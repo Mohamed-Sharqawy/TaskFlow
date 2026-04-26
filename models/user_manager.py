@@ -3,7 +3,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from utils.helpers import find_user_by_id, find_user_by_username, make_response
 from utils.validators import validate_login_fields, validate_password, validate_username
 
-class UserManage:
+class UserManager:
     
     def __init__(self, storage):
         
