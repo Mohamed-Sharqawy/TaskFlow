@@ -39,7 +39,11 @@ Comfort Zone is a lightweight, card-based productivity application designed to h
    ```
 3. **Run the app**
    ```bash
-   python app.py
+   python program.py
+   ```
+   or
+   ```bash
+   flask --app program run
    ```
    The application will be accessible at `http://127.0.0.1:5000`.
 
