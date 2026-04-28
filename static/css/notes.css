@@ -1,0 +1,19 @@
+/* ================================================================
+   Notes Page — Full-Size Layout
+   ================================================================ */
+
+/* ---------- Full Mode Editor Overrides ---------- */
+.notes-page .cz-note-body {
+  min-height: 260px;
+  max-height: 500px;
+}
+
+.notes-page .cz-note-list {
+  max-height: 500px;
+}
+
+@media (max-width: 600px) {
+  .notes-page .cz-note-body {
+    min-height: 180px;
+  }
+}

@@ -20,6 +20,34 @@ card_manager = CardManager(storage)
 notes_manager = NoteManager(notes_storage)
 auth_srevice = AuthService(user_manager)
 
+@app.route("/")
+def login_page():
+    """Serve the login page (default entry point)."""
+    return render_template("login.html")
+
+
+@app.route("/register")
+def register_page():
+    """Serve the registration page."""
+    return render_template("register.html")
+
+
+@app.route("/dashboard")
+def dashboard_page():
+    """Serve the main dashboard page."""
+    return render_template("dashboard.html")
+
+
+@app.route("/comfort-zone")
+def comfort_zone_page():
+    """Serve the Comfort Zone productivity page."""
+    return render_template("comfort_zone.html")
+
+
+@app.route("/notes")
+def notes_page():
+    """Serve the Notes management page."""
+    return render_template("notes.html")
 
 def api_response(result, success_key=None, success_status=200):
     
