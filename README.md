@@ -46,6 +46,8 @@ Comfort Zone is a lightweight, card-based productivity application designed to h
    flask --app program run
    ```
    The application will be accessible at `http://127.0.0.1:5000`.
+   ## Note :
+   if you are running the dev version you'll need to replace the "program" word with "app"
 
 ## Project Structure
 - `app.py`: Main Flask application and routing layer.
