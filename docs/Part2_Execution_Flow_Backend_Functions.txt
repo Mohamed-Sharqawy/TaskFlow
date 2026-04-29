@@ -1,0 +1,510 @@
+================================================================================
+  COMFORT ZONE (TaskFlow) — TECHNICAL DEEP-DIVE DOCUMENTATION
+  Part 2 of 5: Execution Flow and Backend Functions Deep Dive
+================================================================================
+
+
+================================================================================
+  5. EXECUTION FLOW
+================================================================================
+
+5.1 APPLICATION STARTUP (Entry Point: app.py, line 284-287)
+-------------------------------------------------------------
+
+  Step 1: Python executes "python app.py"
+  Step 2: Module-level code runs:
+    a) Flask app instance created: app = Flask(__name__)
+    b) DATA_FILE path resolved: <project>/data/users.json
+    c) NOTES_FILE path resolved: <project>/data/notes.json
+    d) JsonStorage instances created:
+       - storage = JsonStorage(DATA_FILE)
+         -> Sets self.filepath, creates threading.Lock()
+         -> Uses default: {"users": [], "last_user_id": 0}
+       - notes_storage = JsonStorage(NOTES_FILE, default_data={"notes": [], "last_note_id": 0})
+    e) Manager instances created:
+       - user_manager = UserManager(storage)
+       - card_manager = CardManager(storage)
+       - note_manager = NoteManager(notes_storage)
+    f) Service instances created:
+       - auth_service = AuthService(user_manager)
+    g) All @app.route decorators register endpoints with Flask
+  Step 3: if __name__ == "__main__" block:
+    a) storage.ensure_file_exists()
+       -> Creates data/ directory if missing (os.makedirs)
+       -> Creates users.json with DEFAULT_DATA if file doesn't exist
+    b) notes_storage.ensure_file_exists()
+       -> Creates notes.json with custom default if file doesn't exist
+    c) app.run(debug=True, port=5000)
+       -> Starts Flask dev server on http://localhost:5000
+       -> Debug mode enables auto-reload and debugger
+
+5.2 PAGE LOAD FLOW: LOGIN PAGE (GET /)
+----------------------------------------
+
+  Server side:
+    1. Browser requests GET /
+    2. Flask matches route "/" -> login_page()
+    3. render_template("login.html") returns HTML
+    4. HTML includes: Bootstrap CSS, style.css, theme.js, state.js, api.js, auth.js
+
+  Client side (scripts execute in order):
+    1. theme.js (DOMContentLoaded):
+       -> Reads localStorage "theme" (default "light")
+       -> Adds "light-mode" or "dark-mode" class to <body>
+       -> Binds click on all .theme-toggle-btn elements
+    2. state.js (IIFE, immediate):
+       -> Creates global State object with localStorage helpers
+    3. api.js (IIFE, immediate):
+       -> Creates global API object with fetch wrappers
+    4. auth.js (IIFE, immediate):
+       -> Checks State.getSession()
+       -> If session exists with user_id: redirects to /dashboard (already logged in)
+       -> If no session: finds #login-form or #register-form
+       -> Attaches submit event listener
+
+5.3 LOGIN FLOW (POST /api/login)
+---------------------------------
+
+  Client side:
+    1. User fills username + password, clicks "Sign In"
+    2. auth.js submit handler fires:
+       a) e.preventDefault()
+       b) hideError()
+       c) Validates non-empty fields client-side
+       d) Disables button, shows "Signing in..."
+       e) Calls API.login(username, password)
+          -> fetch("/api/login", {method: "POST", body: JSON.stringify(...)})
+
+  Server side:
+    3. Flask matches POST /api/login -> api_login()
+    4. request.get_json() extracts {username, password}
+    5. auth_service.login(username, password)
+       -> Delegates to user_manager.login(username, password)
+    6. UserManager.login():
+       a) validate_login_fields(username, password)
+          -> Checks both non-empty, returns {success: True/False}
+       b) Acquires self.storage.lock (threading.Lock context manager)
+       c) data = self.storage.read()
+          -> Opens users.json, json.load()
+       d) find_user_by_username(data, username)
+          -> Linear scan of data["users"] list
+       e) If user not found: returns {success: False, error: "user_not_found", status: 404}
+       f) check_password_hash(user["password"], password)
+          -> Werkzeug verifies scrypt hash
+       g) If wrong password: returns {success: False, error: "Invalid password.", status: 401}
+       h) Returns {success: True, data: {user_id: int, username: str}}
+    7. api_response(result) converts to JSON:
+       -> Success: jsonify({user_id, username}), 200
+       -> Failure: jsonify({error: "..."}), status_code
+
+  Client side (continued):
+    8. API.login() resolves with {user_id, username}
+    9. State.saveSession(data.username, data.user_id)
+       -> localStorage.setItem("taskapp_session", JSON.stringify({username, user_id}))
+   10. window.location.href = "/dashboard" (redirect)
+
+  Special case - user_not_found:
+    - auth.js catches error string "user_not_found"
+    - Shows "Account not found. Redirecting to register..."
+    - After 1500ms, redirects to /register
+
+5.4 DASHBOARD LOAD FLOW (GET /dashboard)
+------------------------------------------
+
+  Server side:
+    1. Flask serves dashboard.html
+
+  Client side:
+    1. theme.js: applies saved theme
+    2. state.js: creates State module
+    3. api.js: creates API module
+    4. app.js (IIFE, immediate):
+       a) SESSION GUARD:
+          -> State.getSession() -> if null or no user_id -> redirect to "/"
+       b) Extracts userId, username from session
+       c) init() function runs:
+          -> Sets username in navbar (#user-name)
+          -> Creates random avatar from AVATARS array (SVG data URIs)
+          -> Restores UI state from localStorage:
+             searchInput.value = State.getSearch()
+             filterSelect.value = State.getFilter()
+             sortSelect.value = State.getSort()
+             newCardInput.value = State.getNewCardDraft()
+          -> Binds all event listeners (logout, add card, search, filter, sort)
+          -> Calls loadCards()
+       d) loadCards():
+          -> API.getCards(userId) -> GET /api/cards?user_id=X
+          -> Server: card_manager.get_cards(user_id)
+             -> validates user_id
+             -> reads data, finds user, returns user["cards"]
+          -> Response: {cards: [...]}
+          -> cards = data.cards (stored in closure variable)
+          -> renderCards() called
+
+5.5 CARD RENDERING PIPELINE (app.js renderCards())
+----------------------------------------------------
+
+    1. Read current search/filter/sort from DOM inputs
+    2. Clone cards array: filtered = [...cards]
+    3. SEARCH: filter cards where title or any task text matches query
+    4. FILTER:
+       - "completed": keep cards that have at least one completed task
+       - "pending": keep cards that have at least one incomplete task
+       - "all": no filtering
+    5. SORT:
+       - "newest": sort by created_at descending
+       - "oldest": sort by created_at ascending
+       - "title": sort by title alphabetically
+    6. updateStats(): count total cards, tasks, done, pending from ALL cards
+    7. If filtered is empty: show empty state message
+    8. For each card: buildCardElement(card, query, editingState)
+       -> Creates DOM element with card header, task list, add-task input, footer
+       -> Checks State.getEditing() to render inline edit inputs if active
+       -> Applies search highlight via highlight() function
+       -> Restores draft text from State.getDraft(card.id)
+
+5.6 COMFORT ZONE LOAD FLOW (GET /comfort-zone)
+-------------------------------------------------
+
+  Scripts loaded (in order):
+    theme.js -> state.js -> api.js -> pomodoro.js -> video_player.js ->
+    notes_editor.js -> comfort_zone_controller.js
+
+  comfort_zone_controller.js init():
+    1. SESSION GUARD: redirect if not logged in
+    2. Create Bootstrap Modal instance for popup
+    3. Set username in navbar
+    4. Initialize SVG ring (set radius, circumference, dasharray)
+    5. VideoPlayer.init("#cz-video-wrapper")
+       -> Stores wrapper element ref
+       -> Starts setInterval for periodic currentTime persistence
+    6. NotesEditor.init("#cz-notes-container", userId, {compact: true})
+       -> Renders editor HTML into container
+       -> Binds toolbar, save, delete, search events
+       -> Calls refresh() -> API.getNotes() -> renders notes list
+    7. bindEvents(): wire all button clicks and CustomEvent listeners
+    8. recoverState():
+       -> Read Pomodoro.getState() from localStorage
+       -> If timer was running/paused: restore settings inputs, lock them,
+          set button states
+       -> Pomodoro.recover(): recalculate remaining time from real clock
+       -> Read VideoPlayer.getState() from localStorage
+       -> If video URL saved: set input value, call VideoPlayer.recover()
+       -> Update timer display and ring from current state
+    9. Start setInterval(updateVideoStatus, 500) for time display
+
+
+================================================================================
+  6. BACKEND FUNCTIONS AND METHODS DEEP DIVE
+================================================================================
+
+6.1 JsonStorage CLASS (services/json_storage.py)
+-------------------------------------------------
+
+  CLASS ATTRIBUTES:
+    DEFAULT_DATA = {"users": [], "last_user_id": 0}
+
+  __init__(self, filepath, default_data=None)
+    Parameters:
+      filepath (str): Absolute path to JSON file
+      default_data (dict|None): Custom default structure for new files
+    Logic:
+      - Stores filepath
+      - Creates threading.Lock() for thread safety
+      - If default_data provided, uses it; otherwise uses DEFAULT_DATA
+    Side effects: None
+
+  read(self)
+    Parameters: None
+    Returns: dict — the parsed JSON data
+    Logic:
+      - Opens self.filepath with UTF-8 encoding
+      - Returns json.load(f)
+    Side effects: File I/O (read)
+    Called from: All manager methods after acquiring self.storage.lock
+
+  write(self, data)
+    Parameters:
+      data (dict): Complete data structure to persist
+    Returns: None
+    Logic:
+      - Opens self.filepath for writing (UTF-8)
+      - json.dump with indent=2, ensure_ascii=False
+    Side effects: Overwrites entire JSON file
+    Called from: All manager methods that modify data
+
+  ensure_file_exists(self)
+    Parameters: None
+    Returns: None
+    Logic:
+      - os.makedirs(dirname, exist_ok=True) — creates data/ dir
+      - If file doesn't exist: calls self.write(self._default_data)
+    Side effects: Creates directory and file on disk
+    Called from: app.py at startup (line 285-286)
+
+  THREADING MODEL:
+    - self.lock is a threading.Lock() instance
+    - Managers acquire it via "with self.storage.lock:" context manager
+    - This serializes all read-modify-write operations
+    - Prevents race conditions when Flask handles concurrent requests
+    - Lock is held for entire read-modify-write cycle (not just read or write)
+
+6.2 AuthService CLASS (services/auth_service.py)
+--------------------------------------------------
+
+  __init__(self, user_manager)
+    Stores reference to UserManager instance.
+
+  login(self, username, password)
+    Pure delegation: return self.user_manager.login(username, password)
+
+  register(self, username, password)
+    Pure delegation: return self.user_manager.register(username, password)
+
+  PURPOSE: Decouples route handlers from UserManager implementation.
+  Allows adding cross-cutting concerns (logging, rate limiting) without
+  modifying UserManager or routes.
+
+6.3 UserManager CLASS (models/user_manager.py)
+------------------------------------------------
+
+  __init__(self, storage)
+    Stores JsonStorage reference.
+
+  register(self, username, password)
+    Parameters:
+      username (str): Trimmed username
+      password (str): Raw password
+    Returns: dict {success, data|error, status?}
+    Logic:
+      1. validate_login_fields(username, password) — both non-empty
+      2. validate_username(username) — min 3 chars
+      3. validate_password(password) — min 4 chars
+      4. Acquire storage.lock
+      5. Read data from JSON file
+      6. find_user_by_username(data, username) — check duplicate
+         If exists: return error "Username already exists.", 409
+      7. Increment data["last_user_id"]
+      8. Create new_user dict:
+         - id: incremented ID
+         - username: provided
+         - password: generate_password_hash(password) (scrypt)
+         - cards: [] (empty list)
+      9. Append to data["users"]
+     10. Write data back to file
+     11. Return {success: True, data: {user_id, username}}
+    Side effects: Modifies users.json, generates password hash
+
+  login(self, username, password)
+    Parameters:
+      username (str): Trimmed username
+      password (str): Raw password
+    Returns: dict {success, data|error, status?}
+    Logic:
+      1. validate_login_fields() — both non-empty
+      2. Acquire lock, read data
+      3. find_user_by_username() — linear scan
+      4. If not found: return error "user_not_found", 404
+      5. check_password_hash(user["password"], password)
+      6. If mismatch: return error "Invalid password.", 401
+      7. Return {success: True, data: {user_id, username}}
+    Side effects: None (read-only)
+
+  get_user(self, user_id)
+    Parameters: user_id (int)
+    Returns: dict with user data or error
+    Logic: Lock, read, find_user_by_id(), return user or 404
+    Called from: Not currently used in routes (available for future use)
+
+6.4 CardManager CLASS (models/card_manager.py)
+------------------------------------------------
+
+  INTERNAL HELPERS:
+
+  _get_user_or_error(self, data, user_id)
+    Returns: tuple (user_dict, None) or (None, error_response)
+    Logic: Calls find_user_by_id(), returns 404 error if not found
+
+  _get_card_or_error(self, user, card_id)
+    Returns: tuple (card_dict, None) or (None, error_response)
+    Logic: Calls find_card(), returns 404 error if not found
+
+  CARD OPERATIONS:
+
+  get_cards(self, user_id)
+    Validates user_id -> lock -> read -> find user -> return user["cards"]
+    Returns: {success: True, data: [card_list]}
+
+  create_card(self, user_id, title)
+    Validates user_id and title -> lock -> read -> find user
+    Creates card dict:
+      {id: next_card_id(user), title, created_at: utc_timestamp(), tasks: []}
+    Appends to user["cards"] -> writes -> returns new card
+
+  update_card(self, user_id, card_id, title)
+    Validates -> lock -> read -> find user -> find card
+    Sets card["title"] = title -> writes -> returns updated card
+
+  delete_card(self, user_id, card_id)
+    Validates -> lock -> read -> find user
+    Filters out card by ID using list comprehension
+    Checks if length changed (card existed) -> writes
+    Returns: "Card deleted." or 404
+
+  bulk_delete_cards(self, user_id)
+    Validates -> lock -> read -> find user
+    Sets user["cards"] = [] -> writes
+    Returns: "All cards deleted."
+
+  TASK OPERATIONS:
+
+  add_task(self, user_id, card_id, text)
+    Validates user_id and text -> lock -> read -> find user -> find card
+    Creates: {"text": text, "completed": False}
+    Appends to card["tasks"] -> writes -> returns updated card
+
+  update_task(self, user_id, card_id, task_index, body)
+    Validates user_id -> lock -> read -> find user -> find card
+    Checks task_index bounds (0 <= idx < len)
+    If "text" in body: validates non-empty, sets task["text"]
+    If "completed" in body: sets task["completed"] = bool(value)
+    Writes -> returns updated card
+
+  delete_task(self, user_id, card_id, task_index)
+    Validates -> lock -> read -> find user -> find card
+    Bounds check -> card["tasks"].pop(task_index) -> writes
+    Returns updated card
+
+  bulk_task_action(self, user_id, card_id, action)
+    Validates user_id and action (must be "complete_all" or "delete_completed")
+    Lock -> read -> find user -> find card
+    "complete_all": sets completed=True on every task
+    "delete_completed": filters out completed tasks via list comprehension
+    Writes -> returns updated card
+
+6.5 NoteManager CLASS (models/note_manager.py)
+------------------------------------------------
+
+  INTERNAL HELPER:
+
+  _find_note(self, data, note_id)
+    Linear scan of data["notes"] matching note["id"] == note_id
+    Returns note dict or None
+
+  CRUD OPERATIONS:
+
+  get_notes(self, user_id)
+    Validates user_id -> lock -> read
+    Filters notes by user_id
+    Sorts by created_at descending (newest first)
+    Returns filtered list
+
+  create_note(self, user_id, title, body="")
+    Validates user_id and title -> generates UUID4 ID
+    Creates note dict:
+      {id: uuid4, user_id, title, body, created_at: utc_timestamp(), updated_at: same}
+    Lock -> read -> append -> write -> return new note
+
+  update_note(self, note_id, user_id, title=None, body=None)
+    Validates user_id -> lock -> read -> find note
+    Ownership check: note["user_id"] != user_id -> 403 Unauthorized
+    If title provided: strip, validate, set note["title"]
+    If body provided: set note["body"]
+    Updates note["updated_at"] -> writes -> returns updated note
+
+  delete_note(self, note_id, user_id)
+    Validates user_id -> lock -> read -> find note
+    Ownership check -> filters out note by ID -> writes
+    Returns "Note deleted."
+
+  search_notes(self, user_id, query)
+    Validates user_id -> lock -> read
+    Lowercases query, filters notes where:
+      note["user_id"] == user_id AND query in note["title"].lower()
+    Sorts by created_at descending
+    Returns matching list
+
+6.6 UTILITY FUNCTIONS (utils/helpers.py)
+------------------------------------------
+
+  find_user_by_id(data, user_id)
+    Linear scan of data["users"], matches user["id"] == user_id
+    Returns dict or None
+
+  find_user_by_username(data, username)
+    Linear scan of data["users"], matches user["username"] == username
+    Returns dict or None
+
+  find_card(user, card_id)
+    Linear scan of user["cards"], matches card["id"] == card_id
+    Returns dict or None
+
+  next_card_id(user)
+    If no cards: returns 1
+    Otherwise: max(card["id"] for all cards) + 1
+    Note: This is NOT a global auto-increment; IDs are per-user
+
+  utc_timestamp()
+    Returns datetime.now(timezone.utc).isoformat()
+    Example: "2026-04-22T08:30:00+00:00"
+
+  make_response(success, data=None, error=None, status=None)
+    Builds standardized dict: {success, data, error, status?}
+    Used by ALL manager methods to return results
+    The route layer (app.py) converts these to Flask JSON responses
+
+6.7 VALIDATION FUNCTIONS (utils/validators.py)
+-------------------------------------------------
+
+  All validators return: {"success": True} or {"success": False, "error": "..."}
+  Built using internal _ok() and _fail(message) helpers.
+
+  validate_user_id(user_id)
+    Fails if falsy (None, 0, "")
+
+  validate_username(username)
+    Fails if empty or length < 3
+
+  validate_password(password)
+    Fails if empty or length < 4
+
+  validate_login_fields(username, password)
+    Fails if either is empty
+
+  validate_card_title(title)
+    Fails if empty
+
+  validate_task_text(text)
+    Fails if empty
+
+  validate_note_title(title)
+    Fails if empty
+
+  validate_bulk_action(action)
+    Fails if action not in ("complete_all", "delete_completed")
+
+6.8 ROUTE HELPER: api_response() (app.py, line 42-58)
+-------------------------------------------------------
+
+  api_response(result, success_key=None, success_status=200)
+    Parameters:
+      result: Internal dict from manager ({success, data, error, status?})
+      success_key: If set, wraps result["data"] under this key
+      success_status: HTTP status for success (default 200)
+    Logic:
+      If not result["success"]:
+        -> jsonify({"error": result["error"]}), result.get("status", 400)
+      If success_key:
+        -> jsonify({success_key: result["data"]}), success_status
+      Else:
+        -> jsonify(result["data"]), success_status
+    Example:
+      result = {success: True, data: {id: 1, title: "Test"}}
+      api_response(result, success_key="card", success_status=201)
+      -> jsonify({"card": {id: 1, title: "Test"}}), 201
+
+
+================================================================================
+  END OF PART 2
+  Next: Part 3 — Frontend Functions Deep Dive (Foundation + Dashboard)
+================================================================================

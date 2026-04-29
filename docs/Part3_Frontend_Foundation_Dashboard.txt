@@ -1,0 +1,411 @@
+================================================================================
+  COMFORT ZONE (TaskFlow) — TECHNICAL DEEP-DIVE DOCUMENTATION
+  Part 3 of 5: Frontend Functions Deep Dive — Foundation Modules + Dashboard
+================================================================================
+
+
+================================================================================
+  6 (continued). FRONTEND FUNCTIONS DEEP DIVE
+================================================================================
+
+6.9 theme.js — Theme Toggle Module
+-------------------------------------
+
+  EXECUTION: Runs on DOMContentLoaded (all pages).
+
+  LOGIC:
+    1. Read localStorage key "theme" (default "light")
+    2. Add CSS class "{theme}-mode" to document.body
+       -> This activates either light-mode or dark-mode CSS rules
+    3. Query all elements with class ".theme-toggle-btn"
+    4. For each button, attach click handler:
+       a) Determine current mode from body classList
+       b) Compute next mode (toggle)
+       c) Remove current class, add next class
+       d) Save to localStorage
+
+  CSS IMPACT:
+    - body.light-mode: white background, black text
+    - body.dark-mode: black background, white text
+    - Dark mode overrides for .card, .modal-content, .navbar, .form-control,
+      .list-group-item, .text-muted, .bg-light, .border, .btn-outline-secondary, a
+    - Transition on background-color and color (0.3s)
+
+
+6.10 state.js — localStorage State Management Module
+------------------------------------------------------
+
+  PATTERN: Revealing Module (IIFE returning object literal)
+  GLOBAL: Exposes window.State
+
+  INTERNAL CONSTANTS (KEYS object):
+    SESSION:       "taskapp_session"       -> {username, user_id}
+    FILTER:        "taskapp_filter"        -> "all"|"completed"|"pending"
+    SORT:          "taskapp_sort"          -> "newest"|"oldest"|"title"
+    SEARCH:        "taskapp_search"        -> search query string
+    DRAFTS:        "taskapp_drafts"        -> {[card_id]: "draft text"}
+    NEW_CARD_DRAFT:"taskapp_new_card"      -> draft title string
+    EDITING:       "taskapp_editing"       -> {card_id, task_index, tempText, type}
+
+  INTERNAL HELPERS:
+
+  get(key, fallback)
+    Reads localStorage.getItem(key), parses JSON
+    Returns parsed value or fallback on null/error
+    Wraps in try/catch for corrupted data safety
+
+  set(key, value)
+    JSON.stringify(value), stores via localStorage.setItem
+    Fails silently if storage full
+
+  remove(key)
+    localStorage.removeItem(key)
+
+  PUBLIC API — Session:
+    saveSession(username, userId)  -> set(SESSION, {username, user_id})
+    getSession()                   -> get(SESSION, null)
+    clearSession()                 -> remove(SESSION)
+
+  PUBLIC API — Filter/Sort/Search:
+    saveFilter(filter)  / getFilter()   -> defaults to "all"
+    saveSort(sort)      / getSort()     -> defaults to "newest"
+    saveSearch(query)   / getSearch()   -> defaults to ""
+
+  PUBLIC API — Drafts:
+    saveDraft(cardId, text)
+      Reads all drafts object, sets/deletes key, writes back
+      Purpose: Preserves unsaved task text per card across re-renders
+    getDraft(cardId) -> returns draft text or ""
+    clearDraft(cardId) -> calls saveDraft with empty string
+
+  PUBLIC API — New Card Draft:
+    saveNewCardDraft(text) / getNewCardDraft() / clearNewCardDraft()
+    Purpose: Preserves the "new card title" input across page reloads
+
+  PUBLIC API — Editing State:
+    saveEditing(state)
+      state = {card_id, task_index?, tempText, type: "task"|"title"}
+      Purpose: If user is inline-editing a title/task and page reloads,
+      the edit state is recovered and the input is re-rendered
+    getEditing() -> returns state object or null
+    clearEditing() -> remove(EDITING)
+
+  PUBLIC API — Cleanup:
+    clearAll() -> removes ALL keys in KEYS object
+    Called on logout to wipe all app-related localStorage
+
+
+6.11 api.js — API Client Module
+---------------------------------
+
+  PATTERN: Revealing Module (IIFE)
+  GLOBAL: Exposes window.API
+
+  INTERNAL:
+
+  request(url, options)
+    Parameters:
+      url (string): API endpoint path
+      options (object): fetch options (method, body, etc.)
+    Returns: Promise<object> — parsed JSON response
+    Logic:
+      1. Calls fetch(url, {headers: {"Content-Type": "application/json"}, ...options})
+      2. Parses response as JSON: const data = await res.json()
+      3. If !res.ok: throws data.error or "An unexpected error occurred."
+      4. Returns data on success
+    Error handling:
+      - If error is a string (from server): re-throws it
+      - If error is anything else (network failure): throws generic message
+    Called from: All public API methods
+
+  PUBLIC API — Auth:
+    login(u, p)     -> POST /api/login      body: {username, password}
+    register(u, p)  -> POST /api/register   body: {username, password}
+
+  PUBLIC API — Cards:
+    getCards(uid)              -> GET  /api/cards?user_id=uid
+    createCard(uid, title)    -> POST /api/cards           body: {user_id, title}
+    updateCard(uid, cid, t)   -> PUT  /api/cards/{cid}     body: {user_id, title}
+    deleteCard(uid, cid)      -> DELETE /api/cards/{cid}   body: {user_id}
+    deleteAllCards(uid)       -> POST /api/cards/bulk-delete body: {user_id}
+
+  PUBLIC API — Tasks:
+    addTask(uid, cid, text)         -> POST   /api/cards/{cid}/tasks
+    updateTask(uid, cid, idx, upd)  -> PUT    /api/cards/{cid}/tasks/{idx}
+    deleteTask(uid, cid, idx)       -> DELETE /api/cards/{cid}/tasks/{idx}
+    bulkTaskAction(uid, cid, act)   -> POST   /api/cards/{cid}/tasks/bulk
+
+  PUBLIC API — Notes:
+    getNotes(uid)               -> GET    /api/notes?user_id=uid
+    createNote(uid, title, body)-> POST   /api/notes
+    updateNote(id, uid, t, b)   -> PUT    /api/notes/{id}
+    deleteNote(id, uid)         -> DELETE /api/notes/{id}
+    searchNotes(uid, q)         -> GET    /api/notes/search?user_id=uid&q=q
+
+  DESIGN NOTE:
+    - user_id is sent in request body for mutations (POST/PUT/DELETE)
+    - user_id is sent as query parameter for reads (GET)
+    - There is NO token-based auth; user_id is trusted from localStorage
+    - This is a deliberate trade-off for simplicity (not production-secure)
+
+
+6.12 auth.js — Login & Register Page Controller
+--------------------------------------------------
+
+  PATTERN: IIFE (immediately invoked, no global exposure)
+  PAGES: login.html, register.html
+
+  EXECUTION FLOW:
+    1. Check State.getSession():
+       -> If session exists with user_id: redirect to /dashboard immediately
+       -> This prevents logged-in users from seeing login page
+    2. Cache #error-box element
+
+  INTERNAL FUNCTIONS:
+
+  showError(msg)
+    Sets errorBox.textContent = msg
+    Removes "d-none" class to show Bootstrap alert
+
+  hideError()
+    Adds "d-none" class, clears text
+
+  LOGIN FORM HANDLER (if #login-form exists):
+    Event: "submit" on form
+    Logic:
+      1. e.preventDefault()
+      2. hideError()
+      3. Read username (trimmed) and password from inputs
+      4. Client-side validation: both non-empty
+      5. Disable button, show "Signing in..."
+      6. await API.login(username, password)
+      7. On success:
+         -> State.saveSession(data.username, data.user_id)
+         -> Redirect to /dashboard
+      8. On error:
+         -> If error === "user_not_found":
+            Show "Account not found. Redirecting to register..."
+            setTimeout redirect to /register (1500ms)
+         -> Else: show error message
+         -> Re-enable button
+
+  REGISTER FORM HANDLER (if #register-form exists):
+    Event: "submit" on form
+    Logic:
+      1. e.preventDefault()
+      2. hideError()
+      3. Read username (trimmed) and password
+      4. Client-side validation:
+         - Both non-empty
+         - Username >= 3 chars
+         - Password >= 4 chars
+      5. Disable button, show "Creating account..."
+      6. await API.register(username, password)
+      7. On success:
+         -> State.saveSession(data.username, data.user_id)  (auto-login)
+         -> Redirect to /dashboard
+      8. On error: show message, re-enable button
+
+
+6.13 app.js — Dashboard Controller (COMPLETE DEEP DIVE)
+---------------------------------------------------------
+
+  PATTERN: IIFE (no global exposure)
+  PAGE: dashboard.html
+  SIZE: 516 lines — largest frontend module
+
+  CLOSURE VARIABLES:
+    session     — from State.getSession()
+    userId      — session.user_id
+    username    — session.username
+    AVATARS     — array of 6 SVG data URI strings (emoji avatars)
+    cards       — mutable array, in-memory cache of all user cards
+    $           — shorthand for document.querySelector
+
+  DOM REFERENCES (cached at startup):
+    userNameEl, userAvatarEl, logoutBtn, searchInput, filterSelect,
+    sortSelect, newCardInput, addCardBtn, deleteAllBtn, cardGrid,
+    toastContainer, statCards, statTasks, statDone, statPending
+
+  --- init() ---
+    1. Set username text and random avatar image
+    2. Restore UI state from State module (search, filter, sort, new card draft)
+    3. Bind event listeners:
+       - logoutBtn click -> handleLogout
+       - addCardBtn click -> handleAddCard
+       - newCardInput Enter key -> handleAddCard
+       - newCardInput input -> State.saveNewCardDraft()
+       - searchInput input -> debounced(saveSearch + renderCards, 250ms)
+       - filterSelect change -> saveFilter + renderCards
+       - sortSelect change -> saveSort + renderCards
+       - deleteAllBtn click -> handleDeleteAll
+    4. Call loadCards()
+
+  --- loadCards() ---
+    async function
+    Calls API.getCards(userId)
+    Stores result in closure variable: cards = data.cards || []
+    Calls renderCards()
+    On error: shows toast
+
+  --- renderCards() ---
+    THE CORE RENDERING FUNCTION.
+    1. Read search query, filter, sort from DOM
+    2. Clone cards array
+    3. Apply search filter: match title or any task text (case-insensitive)
+    4. Apply filter: "completed" / "pending" / "all"
+    5. Apply sort: "newest" / "oldest" / "title"
+    6. Call updateStats() (counts from ALL cards, not filtered)
+    7. If no results: render empty state HTML
+    8. Clear cardGrid, read editing state
+    9. For each card: create element via buildCardElement(), apply animation delay
+    Called from: init, loadCards, handleAddCard, handleDeleteCard, handleDeleteAll,
+                 handleAddTask, handleToggleTask, handleDeleteTask, handleBulkAction,
+                 commitEditTitle, commitEditTask, inline-edit cancel (Escape)
+
+  --- buildCardElement(card, query, editingState) ---
+    Creates a col-md-6 col-xl-4 div
+    Sets data-cardId attribute
+    Formats date string from card.created_at
+    Checks if title is being inline-edited (from editingState)
+    For each task: checks if that task is being inline-edited
+    Builds complete card HTML with:
+      - Title (or inline edit input)
+      - Delete card button
+      - Date display
+      - Task list with checkboxes, text (or inline edit), edit/delete buttons
+      - Add-task input with draft value from State.getDraft()
+      - Footer: "All Done" and "Clear Done" bulk action buttons
+    All interactive elements have data-action, data-card-id, data-task-index attributes
+
+  --- updateStats() ---
+    Iterates ALL cards (not filtered), counts:
+      totalTasks, done (completed), pending (not completed)
+    Calls animateCounter() for each stat element
+
+  --- animateCounter(el, target) ---
+    If current value != target: set text, apply scale(1.3) transform
+    After 50ms: reset to scale(1) with 0.3s ease transition
+    Creates a subtle "pop" animation on stat changes
+
+  EVENT DELEGATION (cardGrid listeners):
+
+  --- click handler ---
+    Uses event delegation on cardGrid for all card/task actions:
+    1. Find closest [data-action] element:
+       - "delete-card" -> handleDeleteCard(cardId)
+       - "add-task" -> handleAddTask(cardId)
+       - "edit-task" -> startEditTask(cardId, taskIndex)
+       - "delete-task" -> handleDeleteTask(cardId, taskIndex)
+       - "complete-all" -> handleBulkAction(cardId, "complete_all")
+       - "delete-completed" -> handleBulkAction(cardId, "delete_completed")
+    2. Click on .card-title -> startEditTitle(cardId)
+    3. Click on .task-text -> startEditTask(cardId, taskIndex)
+
+  --- change handler ---
+    .task-checkbox change -> handleToggleTask(cardId, taskIndex, checked)
+
+  --- input handler ---
+    [data-draft-card] input -> State.saveDraft(cardId, value)
+    .inline-edit-input input -> State.saveEditing({card_id, task_index, tempText, type})
+
+  --- keydown handler ---
+    Enter on [data-draft-card] -> handleAddTask(cardId)
+    Enter on .inline-edit-input -> trigger blur (which saves)
+    Escape on .inline-edit-input -> State.clearEditing() + renderCards()
+
+  --- focusout handler ---
+    .inline-edit-input blur:
+    If type "title" and non-empty -> commitEditTitle(cardId, newValue)
+    If type "task" and non-empty -> commitEditTask(cardId, taskIndex, newValue)
+    Else -> State.clearEditing() + renderCards()
+
+  CARD ACTION HANDLERS:
+
+  --- handleAddCard() ---
+    Read title from newCardInput, validate non-empty
+    API.createCard(userId, title) -> push new card to cards array
+    Clear input, clear draft, renderCards, toast
+
+  --- handleDeleteCard(cardId) ---
+    confirm() dialog -> API.deleteCard() -> filter out from cards array
+    Clear draft for that card, renderCards, toast
+
+  --- handleDeleteAll() ---
+    confirm() dialog -> API.deleteAllCards() -> cards = []
+    renderCards, toast
+
+  TASK ACTION HANDLERS:
+
+  --- handleAddTask(cardId) ---
+    Find input by [data-draft-card="{cardId}"] selector
+    Read and validate text
+    API.addTask() -> updateLocalCard() -> clearDraft -> renderCards, toast
+
+  --- handleToggleTask(cardId, taskIndex, completed) ---
+    API.updateTask(userId, cardId, taskIndex, {completed})
+    updateLocalCard() -> renderCards
+    On error: toast + loadCards() (full re-sync from server)
+
+  --- handleDeleteTask(cardId, taskIndex) ---
+    API.deleteTask() -> updateLocalCard() -> renderCards, toast
+
+  --- handleBulkAction(cardId, action) ---
+    API.bulkTaskAction() -> updateLocalCard() -> renderCards, toast
+
+  INLINE EDITING HANDLERS:
+
+  --- startEditTitle(cardId) ---
+    Find card in cards array
+    State.saveEditing({card_id, tempText: card.title, type: "title"})
+    renderCards() (which renders an input instead of h5)
+    setTimeout 50ms: focus and select the input
+
+  --- commitEditTitle(cardId, newTitle) ---
+    State.clearEditing()
+    API.updateCard() -> updateLocalCard() -> renderCards, toast
+
+  --- startEditTask(cardId, taskIndex) ---
+    Same pattern as startEditTitle but for task text
+
+  --- commitEditTask(cardId, taskIndex, newText) ---
+    Same pattern as commitEditTitle but calls API.updateTask({text})
+
+  HELPER FUNCTIONS:
+
+  --- updateLocalCard(cardId, updatedCard) ---
+    Finds card in cards array by ID, replaces it
+    Purpose: Sync local cache with server response without full reload
+
+  --- escapeHTML(str) ---
+    Creates a div, sets textContent, reads innerHTML
+    Prevents XSS in rendered content
+
+  --- escapeAttr(str) ---
+    Replaces &, ", ', <, > with HTML entities
+    Used for values inside HTML attributes (value="...")
+
+  --- highlight(text, query) ---
+    Wraps matching substrings in <mark> tags for search highlighting
+    Escapes regex special characters in query
+
+  --- debounce(fn, ms) ---
+    Standard debounce: clearTimeout + setTimeout
+    Returns wrapped function. Used for search input (250ms delay).
+
+  --- toast(msg, type) ---
+    Creates Bootstrap Toast HTML
+    type determines color: "error"->bg-danger, "info"->bg-info, else bg-success
+    Inserts into #toast-container
+    Initializes bootstrap.Toast with 3000ms delay
+    Auto-removes DOM element on hidden.bs.toast event
+
+  --- handleLogout() ---
+    State.clearAll() -> removes all localStorage keys
+    Redirects to "/"
+
+
+================================================================================
+  END OF PART 3
+  Next: Part 4 — Frontend Deep Dive (Pomodoro, Video, Notes, Controller)
+================================================================================

@@ -1,0 +1,632 @@
+================================================================================
+  COMFORT ZONE (TaskFlow) — TECHNICAL DEEP-DIVE DOCUMENTATION
+  Part 4 of 5: Frontend Deep Dive — Pomodoro, Video Player, Notes Editor,
+               Comfort Zone Controller
+================================================================================
+
+
+================================================================================
+  6 (continued). FRONTEND FUNCTIONS DEEP DIVE
+================================================================================
+
+6.14 pomodoro.js — Pomodoro Timer Engine
+-------------------------------------------
+
+  PATTERN: Revealing Module (IIFE)
+  GLOBAL: Exposes window.Pomodoro
+  STORAGE KEY: "cz_timer" (localStorage)
+  TICK INTERVAL: 250ms (UI refresh rate)
+  COMMUNICATION: Dispatches CustomEvents on document object
+
+  CLOSURE VARIABLES:
+    _interval   — setInterval ID (or null)
+    _state      — in-memory state object (or null, loaded lazily)
+
+  STATE STRUCTURE:
+    {
+      currentSession: 1,          // 1-based session counter
+      totalSessions: 4,           // configured total
+      mode: "work",               // "work" | "break"
+      remainingTime: 0,           // seconds (float)
+      initialTime: 0,             // seconds at start of current phase
+      isRunning: false,
+      isPaused: false,
+      startedAt: null,            // Date.now() timestamp (ms)
+      workDuration: 25,           // minutes (user setting)
+      breakDuration: 5,           // minutes (user setting)
+    }
+
+  KEY DESIGN DECISION — TIMESTAMP-BASED TIMING:
+    The timer does NOT decrement a counter each tick.
+    Instead, it records startedAt (Date.now()) and initialTime (seconds).
+    Each tick computes: remaining = initialTime - (Date.now() - startedAt) / 1000
+    This means:
+      - Timer accuracy is independent of setInterval drift
+      - If page is backgrounded (browser throttles timers), remaining time
+        is still correct on next tick
+      - On page reload, recovery recalculates from saved startedAt
+
+  INTERNAL FUNCTIONS:
+
+  defaultState()
+    Returns a fresh state object with all defaults
+
+  loadState()
+    Reads "cz_timer" from localStorage, parses JSON
+    Returns parsed object or null
+
+  saveState(state)
+    JSON.stringify state, writes to localStorage
+
+  clearState()
+    Removes "cz_timer" from localStorage
+
+  getState()
+    Lazy initialization: if _state is null, load from storage or use default
+    Returns COPY (spread operator) to prevent external mutation
+
+  setState(updates)
+    Merges updates into _state via Object.assign
+    Immediately persists via saveState()
+
+  emit(name, detail)
+    Dispatches new CustomEvent(name, {detail}) on document
+    Events emitted:
+      "pomodoro:tick"       — every 250ms with current state
+      "pomodoro:sessionEnd" — work session timer reached 0
+      "pomodoro:breakEnd"   — break timer reached 0
+      "pomodoro:modeSwitch" — switched between work and break
+      "pomodoro:complete"   — all sessions finished
+      "pomodoro:reset"      — timer was reset
+
+  tick()
+    Called every 250ms by setInterval
+    1. Get state — if not running or paused, return
+    2. Calculate elapsed = (Date.now() - startedAt) / 1000
+    3. remaining = max(0, initialTime - elapsed)
+    4. setState({remainingTime: remaining})
+    5. emit("pomodoro:tick", state)
+    6. If remaining <= 0: call handleTimerEnd()
+
+  handleTimerEnd()
+    Stops interval
+    If mode == "work":
+      -> Set isRunning=false, isPaused=false, remainingTime=0
+      -> emit("pomodoro:sessionEnd")
+      -> Controller shows popup: "Continue" or "Take Break"
+    If mode == "break":
+      -> Set isRunning=false, isPaused=false, remainingTime=0
+      -> emit("pomodoro:breakEnd")
+      -> Controller shows popup: "Start Work" or "Another Break"
+    CRITICAL: Does NOT auto-advance. User must choose via popup.
+
+  startInterval() / stopInterval()
+    Manages setInterval(tick, 250) lifecycle
+
+  PUBLIC API:
+
+  start(workMin, breakMin, sessions)
+    Parameters: integers (parsed from input values)
+    Returns: boolean (false if invalid)
+    Validation: all must be >= 1
+    Logic:
+      1. Calculate workSec = workMin * 60
+      2. Create fresh state: session 1, mode "work", remaining=workSec,
+         initial=workSec, running=true, startedAt=Date.now()
+      3. Save state, start interval
+      4. Emit initial tick
+    Called from: controller handleStart()
+
+  pause()
+    Pre-check: must be running and not already paused
+    Logic:
+      1. Calculate remaining from elapsed time
+      2. setState: isPaused=true, remainingTime=remaining, startedAt=null
+      3. Stop interval
+      4. Emit tick (so UI updates button state)
+    Purpose: Snapshots remaining time so resume can restart accurately
+
+  resume()
+    Pre-check: must be running and paused
+    Logic:
+      1. setState: isPaused=false, initialTime=remainingTime, startedAt=Date.now()
+      2. Start interval, emit tick
+    Purpose: Resets the timing baseline to current remaining time
+
+  reset()
+    Stops interval, resets _state to default, clears localStorage
+    Emits "pomodoro:reset"
+
+  nextSession()
+    Called when user clicks "Continue" after work session ends
+    Logic:
+      1. Increment currentSession
+      2. If next > totalSessions: reset() + emit "pomodoro:complete"
+      3. Else: set mode="work", calculate new workSec, start timer
+         Emit "pomodoro:modeSwitch"
+
+  startBreak()
+    Called when user clicks "Take Break" from popup
+    Logic:
+      1. Calculate breakSec from breakDuration
+      2. Set mode="break", remainingTime=breakSec, start timer
+      3. Emit "pomodoro:modeSwitch"
+    NOTE: Does NOT increment session counter
+
+  recover()
+    Called on page load to restore timer state
+    Logic:
+      1. Load state from localStorage
+      2. If null: nothing to recover
+      3. If was running and not paused and has startedAt:
+         a) Recalculate remaining from real clock
+         b) If remaining <= 0: timer expired while away -> handleTimerEnd()
+         c) If remaining > 0: update remaining, start interval
+      4. Emit tick so UI renders current state
+
+
+6.15 video_player.js — Video Player Wrapper
+----------------------------------------------
+
+  PATTERN: Revealing Module (IIFE)
+  GLOBAL: Exposes window.VideoPlayer
+  STORAGE KEY: "cz_video" (localStorage)
+  SAVE INTERVAL: 2000ms (persist currentTime periodically)
+  COMMUNICATION: Dispatches CustomEvents on document
+
+  CLOSURE VARIABLES:
+    _videoEl        — HTMLVideoElement reference (for HTML5)
+    _wrapperEl      — container div element
+    _saveTimer      — setInterval ID for periodic persistence
+    _isYouTube      — boolean flag
+    _ytPlayer       — YT.Player instance
+    _ytReady        — boolean (true after onReady fires)
+    _ytAPILoading   — boolean (prevents double-loading API script)
+    _state          — in-memory state
+
+  STATE STRUCTURE:
+    {
+      videoUrl: "",       // saved URL
+      currentTime: 0,     // playback position in seconds
+      isPlaying: false    // playing state
+    }
+
+  EVENTS EMITTED:
+    "video:stateChange"  — {videoUrl, currentTime, isPlaying}
+    "video:error"        — {message: "..."}
+
+  YOUTUBE HELPERS:
+
+  extractYouTubeId(url)
+    Tests URL against 3 regex patterns:
+      - youtube.com/watch?v=ID
+      - youtu.be/ID
+      - youtube.com/embed/ID
+    Returns 11-char video ID or null
+
+  loadYouTubeAPI()
+    Returns Promise that resolves when YT.Player is available
+    Logic:
+      1. If window.YT.Player exists: resolve immediately
+      2. If already loading (_ytAPILoading): poll every 100ms until ready
+      3. Else: set _ytAPILoading=true, create <script> tag for iframe_api
+         Set window.onYouTubeIframeAPIReady callback to resolve promise
+    Preserves any existing onYouTubeIframeAPIReady callback
+
+  CORE FUNCTIONS:
+
+  init(wrapperSelector)
+    Stores wrapper element reference
+    Starts setInterval(persistCurrentTime, 2000)
+
+  persistCurrentTime()
+    If YouTube and playing: save ytPlayer.getCurrentTime()
+    If HTML5 and not paused: save videoEl.currentTime
+    Purpose: Periodic snapshot so recovery can restore position
+
+  loadVideo(url)
+    Parameters: url (string)
+    Returns: boolean (false if no wrapper or empty URL)
+    Logic:
+      1. destroyPlayer() — clean up previous player
+      2. Clear wrapper innerHTML
+      3. Extract YouTube ID from URL
+      4. IF YouTube:
+         a) Create placeholder div#cz-yt-player
+         b) setState with URL, reset time/playing
+         c) loadYouTubeAPI().then() -> create YT.Player:
+            - videoId, playerVars (autoplay:0, rel:0, modestbranding:1)
+            - events: onReady, onStateChange, onError
+      5. IF HTML5:
+         a) Create <video> element, set src, preload="metadata"
+         b) Wire native events:
+            "play" -> setState isPlaying:true, emit stateChange
+            "pause" -> setState isPlaying:false, save currentTime
+            "ended" -> setState isPlaying:false, currentTime:0
+            "error" -> emit video:error
+         c) setState with URL
+
+  YouTube Event Handlers:
+
+  onYTReady()
+    Sets _ytReady = true, emits stateChange
+
+  onYTStateChange(event)
+    Maps YT.PlayerState values to isPlaying boolean:
+      PLAYING -> isPlaying: true
+      PAUSED/ENDED/CUED -> isPlaying: false, save currentTime
+
+  onYTError()
+    Emits "video:error" with YouTube-specific message
+
+  PLAYBACK CONTROLS:
+    All controls have dual paths: YouTube API calls vs HTML5 element methods
+
+  play()
+    YouTube: ytPlayer.playVideo()
+    HTML5: videoEl.play() (returns promise, catch ignored)
+
+  pause()
+    YouTube: ytPlayer.pauseVideo()
+    HTML5: videoEl.pause()
+
+  togglePlayPause()
+    YouTube: check getPlayerState(), call play or pause
+    HTML5: check videoEl.paused, call play or pause
+
+  seekForward(seconds=10)
+    YouTube: getCurrentTime() + seconds, seekTo(min(duration, newTime))
+    HTML5: currentTime = min(duration, currentTime + seconds)
+    Both: persist new currentTime
+
+  seekBackward(seconds=10)
+    Same as forward but subtracts, clamped to 0
+
+  toggleFullscreen()
+    If document.fullscreenElement: exitFullscreen()
+    Else: wrapperEl.requestFullscreen()
+
+  getTimeInfo()
+    Returns {current: "M:SS", duration: "M:SS"}
+    YouTube: from ytPlayer.getCurrentTime()/getDuration()
+    HTML5: from videoEl.currentTime/duration
+
+  formatTime(sec)
+    Converts seconds to "M:SS" string
+
+  isLoaded()
+    Returns true if _videoEl exists or _isYouTube is true
+
+  recover()
+    Loads state from localStorage
+    If videoUrl exists: calls loadVideo(url)
+    For HTML5: on "loadedmetadata", sets currentTime to saved position
+    Does NOT auto-play (controller decides)
+
+  destroyPlayer()
+    YouTube: ytPlayer.destroy(), null refs, _ytReady=false
+    HTML5: pause, clear src, null ref
+    Reset _isYouTube
+
+  destroy()
+    Clears save interval + destroyPlayer()
+
+
+6.16 notes_editor.js — Notes Editor Module
+---------------------------------------------
+
+  PATTERN: Revealing Module (IIFE)
+  GLOBAL: Exposes window.NotesEditor
+  USED IN TWO CONTEXTS:
+    1. Comfort Zone page (compact: true) — smaller editor, shorter list
+    2. Notes page (compact: false) — full-size editor and list
+
+  CLOSURE VARIABLES:
+    _userId, _containerEl, _mounted
+    _currentNoteId    — UUID of loaded note (null = creating new)
+    _originalTitle    — title at time of load/save (for change detection)
+    _originalBody     — body at time of load/save
+    _isSaving         — debounce guard
+    _notes            — in-memory notes list cache
+    _titleInput, _bodyEl, _saveBtn, _deleteBtn, _newBtn,
+    _listEl, _searchInput, _statusEl
+    _deleteTargetId   — ID of note pending deletion
+    _searchTimeout    — debounce timer for search
+
+  PUBLIC API:
+
+  init(containerSelector, userId, options)
+    Parameters:
+      containerSelector (string): CSS selector for mount point
+      userId (number): logged-in user ID
+      options (object): {compact: boolean}
+    Logic:
+      1. Query container element, guard against double-mount
+      2. Store userId, set _mounted=true
+      3. render(compact) — injects full editor HTML
+      4. bindEvents() — wires all event listeners
+      5. refresh() — loads notes from server
+
+  loadNote(note)
+    Parameters: note object {id, title, body, ...}
+    Sets _currentNoteId, _originalTitle, _originalBody
+    Populates title input and body contentEditable div
+    Shows delete and new buttons
+    Shows status "Editing: {title}"
+    Highlights active note in list
+
+  clearEditor()
+    Resets all editor state to blank
+    Hides delete/new buttons
+    Focuses title input
+
+  refresh()
+    Calls API.getNotes(userId)
+    Stores result in _notes
+    Calls renderList(_notes)
+
+  INTERNAL FUNCTIONS:
+
+  render(compact)
+    Generates complete HTML structure:
+      - Title input (maxlength 200)
+      - Toolbar: Bold, Italic, Bullet List, Font Size +/- buttons
+      - contentEditable div for body
+      - Save, Delete, New buttons
+      - Status message area
+      - Search input
+      - Notes list container
+    If compact: adds "cz-notes-compact" class (CSS limits list height)
+    Caches all DOM references after innerHTML injection
+
+  bindEvents()
+    Toolbar buttons: click -> document.execCommand(cmd, false, value)
+      Commands: bold, italic, insertUnorderedList, fontSize(5), fontSize(2)
+      After command: focus back to body
+    Save button: click -> handleSave()
+    Delete button: click -> showConfirm()
+    New button: click -> clearEditor()
+    Search input: input -> handleSearch()
+    Keyboard: Ctrl+S / Cmd+S -> handleSave() (with preventDefault)
+
+  handleSave() — CRITICAL FUNCTION (Title-Based Identity Logic)
+    Guard: if _isSaving, return (prevents double-save)
+    Logic:
+      1. Read current title (trimmed) and body (innerHTML)
+      2. VALIDATION: title required (show error if empty)
+      3. CHANGE DETECTION:
+         If _currentNoteId exists AND title unchanged AND body unchanged:
+           -> Show "No changes to save." (skip API call)
+      4. Set saving state (disable button, show "Saving...")
+      5. DECISION LOGIC:
+         IF _currentNoteId exists AND title === _originalTitle:
+           -> SAME title = UPDATE existing note
+           -> API.updateNote(_currentNoteId, userId, title, body)
+           -> Update _originalBody
+           -> Show "Note updated."
+         ELSE (no current note OR title changed):
+           -> NEW note or title changed = CREATE new note
+           -> API.createNote(userId, title, body)
+           -> Set _currentNoteId to new note's UUID
+           -> Update _originalTitle and _originalBody
+           -> Show "Note created."
+      6. Show delete + new buttons
+      7. refresh() — reload notes list
+
+    CRITICAL BEHAVIOR:
+      - If user loads note "Meeting Notes" and changes title to "Meeting Summary",
+        pressing Save creates a NEW note (old one remains)
+      - If user loads note "Meeting Notes" and only changes body,
+        pressing Save UPDATES the existing note
+      - This is the "title-based identity" pattern
+
+  showConfirm(noteId)
+    Sets _deleteTargetId to noteId or _currentNoteId
+    Uses window.confirm() dialog
+    If confirmed: calls handleConfirmDelete()
+
+  handleConfirmDelete()
+    API.deleteNote(_deleteTargetId, userId)
+    If deleting currently open note: clearEditor()
+    Show status, refresh list
+
+  renderList(notes)
+    If empty: show empty state
+    For each note: generate list-group-item HTML with:
+      - Title (escaped, truncated)
+      - Date (formatted)
+      - Edit button (pencil emoji)
+      - Delete button (trash emoji)
+    Wire click handlers:
+      - Edit button: find note in _notes, call loadNote()
+      - Delete button: showConfirm(noteId)
+      - Row click: find note, call loadNote()
+
+  highlightActive(id)
+    Toggle "active" class on list items matching id
+
+  handleSearch()
+    Debounced (300ms)
+    If query empty: renderList(_notes) (show all cached)
+    If query non-empty: API.searchNotes(userId, query)
+    Fallback: if API fails, filter _notes locally by title
+
+  showStatus(msg, type)
+    Sets status element text and CSS class
+    Auto-clears after 4000ms (unless type is "error")
+
+
+6.17 comfort_zone_controller.js — Orchestration Layer
+--------------------------------------------------------
+
+  PATTERN: IIFE (no global exposure)
+  PAGE: comfort_zone.html
+  ROLE: Connects Pomodoro, VideoPlayer, and NotesEditor; manages UI
+
+  CONSTANTS:
+    RING_RADIUS = 96
+    RING_CIRCUMFERENCE = 2 * PI * 96 = ~603.19
+
+  DOM REFERENCES: 20+ cached elements (timer, video, buttons, modal, toast)
+
+  BOOTSTRAP MODAL:
+    czModal = new bootstrap.Modal(popupModalEl, {backdrop: 'static', keyboard: false})
+    Static backdrop: clicking outside does NOT close
+    Keyboard false: Escape key does NOT close
+    User MUST click a popup button to proceed
+
+  --- init() ---
+    1. Create Bootstrap Modal
+    2. Set username
+    3. Initialize SVG ring attributes
+    4. VideoPlayer.init("#cz-video-wrapper")
+    5. NotesEditor.init("#cz-notes-container", userId, {compact: true})
+    6. bindEvents()
+    7. recoverState()
+    8. Start video status update interval (500ms)
+
+  --- bindEvents() ---
+    Timer buttons:
+      btnStart -> handleStart()
+      btnPause -> handlePauseResume()
+      btnReset -> handleReset()
+    Video buttons:
+      btnLoadVideo -> handleLoadVideo()
+      videoUrlInput Enter -> handleLoadVideo()
+      btnPlayPause -> VideoPlayer.togglePlayPause()
+      btnBackward -> VideoPlayer.seekBackward(10)
+      btnForward -> VideoPlayer.seekForward(10)
+      btnFullscreen -> VideoPlayer.toggleFullscreen()
+    Pomodoro CustomEvents:
+      pomodoro:tick -> onTick()
+      pomodoro:sessionEnd -> onSessionEnd()
+      pomodoro:modeSwitch -> onModeSwitch()
+      pomodoro:breakEnd -> onBreakEnd()
+      pomodoro:complete -> onComplete()
+      pomodoro:reset -> onReset()
+    Video CustomEvents:
+      video:stateChange -> onVideoStateChange()
+      video:error -> toast(message, "error")
+    Settings inputs: clamp to minimum 1 on change
+
+  TIMER HANDLERS:
+
+  handleStart()
+    Read work/break/sessions from inputs, validate >= 1
+    Pomodoro.start(work, brk, sess)
+    On success: updateControlButtons("running"), lockSettings(true), toast
+
+  handlePauseResume()
+    If paused: Pomodoro.resume(), update buttons to "running"
+      If work mode and video loaded: VideoPlayer.play()
+    If running: Pomodoro.pause(), update buttons to "paused"
+      VideoPlayer.pause() (always pause video when timer paused)
+
+  handleReset()
+    Pomodoro.reset(), VideoPlayer.pause()
+    updateControlButtons("idle"), lockSettings(false), toast
+
+  POMODORO EVENT HANDLERS:
+
+  onTick(e)
+    Updates timer display and SVG ring from e.detail state
+
+  onSessionEnd(e) — WORK SESSION FINISHED
+    1. Exit fullscreen (so popup is visible)
+    2. VideoPlayer.pause()
+    3. Determine if last session
+    4. Show popup:
+       IF last session:
+         Button: "Finish" -> hidePopup() + handleReset()
+       ELSE:
+         Button: "Continue" -> hidePopup() + Pomodoro.nextSession() + VideoPlayer.play()
+         Button: "Take Break" -> hidePopup() + Pomodoro.startBreak() (video stays paused)
+
+  onModeSwitch(e) — SWITCHED BETWEEN WORK/BREAK
+    Add CSS animation class "mode-switching" (removed after 500ms)
+    Update display and ring
+    If work mode: toast "Focus", play video
+    If break mode: toast "Break", pause video
+
+  onBreakEnd(e) — BREAK TIMER FINISHED
+    1. Exit fullscreen
+    2. VideoPlayer.pause()
+    3. Show popup:
+       Button: "Start Work Session" -> nextSession() + play video
+       Button: "Take Another Break" -> startBreak() (video stays paused)
+
+  onComplete(e) — ALL SESSIONS DONE
+    Exit fullscreen, pause video
+    Show popup: "All sessions completed!"
+    Button: "Start Over" -> handleReset()
+    updateControlButtons("idle"), lockSettings(false)
+
+  onReset()
+    Update timer display and ring from current state
+
+  onVideoStateChange(e)
+    Update play/pause button icon
+
+  UI UPDATE FUNCTIONS:
+
+  updateTimerDisplay(s)
+    Time: format remaining as MM:SS with padStart
+    Mode label: "Focus" (work, running) / "Break" (break, running) / "Ready"
+    Session text: "Session X of Y" or "Configure settings below"
+    Data attribute: timerCard data-mode = s.mode (for CSS theming)
+
+  updateRing(s)
+    If initialTime <= 0: offset = 0 (full ring)
+    progress = remainingTime / initialTime (0 to 1)
+    offset = CIRCUMFERENCE * (1 - progress)
+    Sets stroke-dashoffset on ring-progress circle
+    CSS transition (0.4s ease) provides smooth animation
+
+  updateControlButtons(mode)
+    "idle": show Start, hide Pause/Reset
+    "running": hide Start, show Pause ("Pause") + Reset
+    "paused": hide Start, show Pause ("Resume", green) + Reset
+
+  lockSettings(locked)
+    Disable/enable work/break/sessions inputs
+    Set opacity 0.5 when locked
+
+  updatePlayPauseIcon(isPlaying)
+    Set button text to "⏸" or "▶"
+
+  updateVideoStatus()
+    Called every 500ms
+    If no video loaded: clear text
+    Else: show "M:SS / M:SS" (current / duration)
+
+  POPUP SYSTEM:
+
+  showPopup({icon, title, subtitle, actions})
+    Sets popup modal content (icon, title, subtitle)
+    Clears actions container
+    For each action: creates button with class and click handler
+    Shows Bootstrap modal (czModal.show())
+
+  hidePopup()
+    czModal.hide()
+
+  STATE RECOVERY:
+
+  recoverState()
+    1. Read Pomodoro.getState()
+    2. If running or paused:
+       -> Restore settings inputs from saved workDuration/breakDuration/totalSessions
+       -> Lock settings
+       -> Set button state (paused or running)
+    3. Else: set buttons to idle
+    4. Pomodoro.recover() — recalculates time from real clock
+    5. Read VideoPlayer.getState()
+    6. If videoUrl saved: set URL input value
+    7. VideoPlayer.recover() — loads video, restores position
+    8. Update timer display and ring
+
+
+================================================================================
+  END OF PART 4
+  Next: Part 5 — Data Management, Error Handling, Design Decisions, Walkthrough
+================================================================================

@@ -1,0 +1,53 @@
+{
+  "notes": [
+    {
+      "id": "07684076-1a38-4c03-a468-1e43a962e507",
+      "user_id": 3,
+      "title": "New Note",
+      "body": "<font size=\"5\">this is a title&nbsp;</font><br><ul><li><font size=\"2\">t<i>his is topic one&nbsp;</i></font></li><li><font size=\"2\"><b>this is two 2</b></font></li><li><font size=\"2\">this is three<br>this the fourth subject</font></li></ul>",
+      "created_at": "2026-04-25T11:47:39.653557+00:00",
+      "updated_at": "2026-04-25T11:48:08.107042+00:00"
+    },
+    {
+      "id": "45edf437-6ea2-487e-b61b-62668ced5f86",
+      "user_id": 3,
+      "title": "new Web Course",
+      "body": "<b><font size=\"5\">HTML</font></b><div><ul><li>hypertext markup language&nbsp;</li></ul><b><font size=\"5\">CSS</font></b></div><div><ul><li>cascade style sheets</li></ul></div>",
+      "created_at": "2026-04-25T15:56:23.008331+00:00",
+      "updated_at": "2026-04-25T15:56:23.008331+00:00"
+    },
+    {
+      "id": "35683d97-64bc-43e0-9ec4-6eb187899a0b",
+      "user_id": 4,
+      "title": "work ethics",
+      "body": "<br>",
+      "created_at": "2026-04-29T06:53:06.361265+00:00",
+      "updated_at": "2026-04-29T06:53:06.361265+00:00"
+    },
+    {
+      "id": "8e216d6f-5241-44d3-81ed-4dfa3ea15a8f",
+      "user_id": 4,
+      "title": "howm",
+      "body": "jldkfjasjfdkl",
+      "created_at": "2026-04-29T07:04:52.389624+00:00",
+      "updated_at": "2026-04-29T07:04:52.389624+00:00"
+    },
+    {
+      "id": "e1933819-b3ae-4bcb-8260-7fde9c6d90c9",
+      "user_id": 5,
+      "title": "note",
+      "body": "how are you",
+      "created_at": "2026-04-29T07:32:18.404098+00:00",
+      "updated_at": "2026-04-29T07:32:18.404098+00:00"
+    },
+    {
+      "id": "86691f69-b970-487d-9697-aedfe1d0f344",
+      "user_id": 5,
+      "title": "how",
+      "body": "ajsflkdslkfj<div><br></div><div>ajklfdjajfflk;ajflkjalk</div>",
+      "created_at": "2026-04-29T07:42:06.816715+00:00",
+      "updated_at": "2026-04-29T07:42:26.330440+00:00"
+    }
+  ],
+  "last_note_id": 0
+}

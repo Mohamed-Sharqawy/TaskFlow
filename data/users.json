@@ -1,0 +1,120 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "username": "testuser",
+      "password": "scrypt:32768:8:1$uWDY5RzOlxjXnjFe$0a78fa51e209bcc4b3fb99a42ae5271dab324c29ca60e6b58e775a18b84d7129e0c059b823baed1a3c75209811fe6de75d7e47a1ef520d321358cdaa65da994b",
+      "cards": [
+        {
+          "id": 1,
+          "title": "Work Tasks",
+          "created_at": "2026-04-21T16:46:15.048396+00:00",
+          "tasks": [
+            {
+              "text": "Review PR",
+              "completed": true
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Personal",
+          "created_at": "2026-04-21T16:47:15.864751+00:00",
+          "tasks": [
+            {
+              "text": "Go to gym",
+              "completed": false
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Shopping List",
+          "created_at": "2026-04-21T16:47:22.768458+00:00",
+          "tasks": [
+            {
+              "text": "Buy milk",
+              "completed": false
+            },
+            {
+              "text": "Buy bread",
+              "completed": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "username": "yahya",
+      "password": "scrypt:32768:8:1$DNVUTGv9OZXuqEXe$6b2a6ddbafb72664e6c5cb01dd654dd0c54933d59f0e59b49daa5c0e334c29f580b9f405cce25146c36690664a8df302ee84c73743033f0dd0ac0aaf268c9208",
+      "cards": [
+        {
+          "id": 1,
+          "title": "Personal",
+          "created_at": "2026-04-21T16:52:53.679595+00:00",
+          "tasks": [
+            {
+              "text": "jfsdgkljgdfks4",
+              "completed": false
+            },
+            {
+              "text": "Go to gym",
+              "completed": false
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "zoo",
+          "created_at": "2026-04-21T16:54:36.375147+00:00",
+          "tasks": [
+            {
+              "text": "fdjsklfds",
+              "completed": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "username": "Mohammed",
+      "password": "scrypt:32768:8:1$OXKAXudycumb4174$92a0473dccf0338834527c3aadc9e7489e35f5690d8cd6709cba72d9a94243ee097fa099675f98bfd2257142d4480b2fc80a66326555355d0e8693025170eb9c",
+      "cards": [
+        {
+          "id": 1,
+          "title": "last few touches",
+          "created_at": "2026-04-25T15:49:33.970111+00:00",
+          "tasks": [
+            {
+              "text": "check a few things",
+              "completed": false
+            },
+            {
+              "text": "responsive",
+              "completed": true
+            },
+            {
+              "text": "the video",
+              "completed": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "username": "Bahaa'",
+      "password": "scrypt:32768:8:1$s8HAM2jJYAVmmfNY$4c6d5a4a43ea95dcb0bf0cc8bb6fcfab8ce8ea9a0f75f4d590e355a553c9977c8d454bd0a1b1c0f37f439b5b6b80864bf7788894d362531ba7495a329fb1100a",
+      "cards": []
+    },
+    {
+      "id": 5,
+      "username": "megahed",
+      "password": "scrypt:32768:8:1$DmHar31JShlDvDBM$1e523ed140babbad6961810983faf7431ea212f06d2211cf10986ef015f3cd2db69d74c57f4c16a5ca8d9744d47336017bd65aa39ee7d0a3f2b5ccb92e53f038",
+      "cards": []
+    }
+  ],
+  "last_user_id": 5
+}

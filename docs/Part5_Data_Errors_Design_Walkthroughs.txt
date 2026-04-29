@@ -1,0 +1,665 @@
+================================================================================
+  COMFORT ZONE (TaskFlow) — TECHNICAL DEEP-DIVE DOCUMENTATION
+  Part 5 of 5: State & Data Management, Error Handling, Component Interaction,
+               Design Decisions, End-to-End Walkthroughs
+================================================================================
+
+
+================================================================================
+  7. STATE AND DATA MANAGEMENT
+================================================================================
+
+7.1 BACKEND DATA — JSON FILE STORAGE
+---------------------------------------
+
+  File: data/users.json
+  Structure:
+    {
+      "users": [
+        {
+          "id": 1,                    // auto-incremented integer
+          "username": "testuser",
+          "password": "scrypt:...",   // Werkzeug scrypt hash
+          "cards": [
+            {
+              "id": 1,               // per-user auto-incremented
+              "title": "Work Tasks",
+              "created_at": "2026-04-21T16:46:15+00:00",  // ISO-8601 UTC
+              "tasks": [
+                {"text": "Review PR", "completed": true}
+              ]
+            }
+          ]
+        }
+      ],
+      "last_user_id": 3              // global counter for next user ID
+    }
+
+  File: data/notes.json
+  Structure:
+    {
+      "notes": [
+        {
+          "id": "07684076-1a38-4c03-...",  // UUID4 string
+          "user_id": 3,                     // references users.json user ID
+          "title": "New Note",
+          "body": "<b>HTML content</b>",    // raw HTML from contentEditable
+          "created_at": "2026-04-25T11:47:39+00:00",
+          "updated_at": "2026-04-25T11:48:08+00:00"
+        }
+      ],
+      "last_note_id": 0   // unused legacy field (notes use UUID4 instead)
+    }
+
+  DATA LIFECYCLE:
+
+  Users:
+    Created: POST /api/register -> UserManager.register()
+    Read: POST /api/login -> UserManager.login()
+    Updated: Never (no profile editing feature)
+    Deleted: Never (no account deletion feature)
+
+  Cards:
+    Created: POST /api/cards -> CardManager.create_card()
+    Read: GET /api/cards -> CardManager.get_cards()
+    Updated: PUT /api/cards/:id -> CardManager.update_card()
+    Deleted: DELETE /api/cards/:id or POST /api/cards/bulk-delete
+
+  Tasks:
+    Created: POST /api/cards/:id/tasks -> CardManager.add_task()
+    Read: Returned as part of card data
+    Updated: PUT /api/cards/:id/tasks/:idx -> CardManager.update_task()
+    Deleted: DELETE /api/cards/:id/tasks/:idx or via bulk action
+
+  Notes:
+    Created: POST /api/notes -> NoteManager.create_note()
+    Read: GET /api/notes or GET /api/notes/search
+    Updated: PUT /api/notes/:id -> NoteManager.update_note()
+    Deleted: DELETE /api/notes/:id -> NoteManager.delete_note()
+
+  CONCURRENCY MODEL:
+    - JsonStorage uses threading.Lock() for each storage instance
+    - Two separate locks: one for users.json, one for notes.json
+    - Lock acquired via "with self.storage.lock:" context manager
+    - Entire read-modify-write cycle is atomic (within one process)
+    - NOT safe for multi-process deployments (no file locking)
+
+7.2 FRONTEND STATE — localStorage
+------------------------------------
+
+  KEY: "taskapp_session"
+  Content: {username: "...", user_id: 1}
+  Lifecycle: Set on login/register, cleared on logout
+  Used by: Session guards on all pages, API calls (user_id source)
+
+  KEY: "taskapp_filter"
+  Content: "all" | "completed" | "pending"
+  Lifecycle: Set on filter change, persists indefinitely
+  Used by: Dashboard renderCards() filter step
+
+  KEY: "taskapp_sort"
+  Content: "newest" | "oldest" | "title"
+  Lifecycle: Set on sort change, persists indefinitely
+  Used by: Dashboard renderCards() sort step
+
+  KEY: "taskapp_search"
+  Content: search query string
+  Lifecycle: Set on each keystroke (debounced), persists indefinitely
+  Used by: Dashboard renderCards() search step
+
+  KEY: "taskapp_drafts"
+  Content: {[card_id]: "draft text"}
+  Lifecycle: Set on keystroke in add-task input, cleared on successful add
+  Used by: Dashboard buildCardElement() to restore draft values
+
+  KEY: "taskapp_new_card"
+  Content: draft card title string
+  Lifecycle: Set on keystroke in new-card input, cleared on successful create
+  Used by: Dashboard init() to restore new-card input value
+
+  KEY: "taskapp_editing"
+  Content: {card_id: int, task_index: int|null, tempText: string, type: "task"|"title"}
+  Lifecycle: Set when inline edit starts, updated on keystroke, cleared on save/cancel
+  Used by: Dashboard renderCards() to render input instead of text
+
+  KEY: "cz_timer"
+  Content: Full Pomodoro state object (see Part 4, section 6.14)
+  Lifecycle: Set on every tick/state change, cleared on reset
+  Used by: Pomodoro.recover() on page load
+
+  KEY: "cz_video"
+  Content: {videoUrl, currentTime, isPlaying}
+  Lifecycle: Set on video load and periodically (2s), never explicitly cleared
+  Used by: VideoPlayer.recover() on page load
+
+  KEY: "theme"
+  Content: "light" | "dark"
+  Lifecycle: Set on theme toggle click, persists indefinitely
+  Used by: theme.js on every page load
+
+7.3 DATA STRUCTURES AND WHY
+------------------------------
+
+  Cards contain Tasks (nested array):
+    WHY: Cards and tasks are always loaded together. No need for separate
+    task storage. Simplifies API (return whole card after task mutation).
+
+  Tasks identified by array index (not ID):
+    WHY: Tasks are always accessed within a card context. Index-based
+    addressing is simpler. Trade-off: deletion shifts indices (handled by
+    full re-render after each mutation).
+
+  Notes in separate JSON file:
+    WHY: Notes belong to users but have different access patterns (search,
+    UUID IDs, rich HTML bodies). Separate file prevents bloating user records
+    and allows independent locking.
+
+  Notes use UUID4 IDs (not auto-increment):
+    WHY: UUID4 is globally unique without a shared counter. Simplifies
+    concurrent creation. The "last_note_id" field in notes.json is a legacy
+    artifact that is no longer used.
+
+  Passwords stored as scrypt hashes:
+    WHY: Werkzeug's generate_password_hash uses scrypt by default.
+    Scrypt is memory-hard, resistant to GPU/ASIC attacks.
+
+  In-memory cards cache in app.js:
+    WHY: After loading cards from server, they are cached in a closure
+    variable. Mutations update the local cache from the server response
+    (updateLocalCard), avoiding a full reload on every action.
+
+
+================================================================================
+  8. ERROR HANDLING AND VALIDATION
+================================================================================
+
+8.1 BACKEND ERROR HANDLING
+----------------------------
+
+  VALIDATION LAYER (validators.py):
+    - Every input is validated before any data access
+    - Validators return {success: False, error: "message"} on failure
+    - Managers check result and return early with make_response(False, ...)
+    - Error responses include HTTP status codes (400, 401, 403, 404, 409)
+
+  DATA INTEGRITY CHECKS (managers):
+    - User existence verified before any card/task/note operation
+    - Card existence verified before task operations
+    - Task index bounds checked before access
+    - Note ownership verified before update/delete (403 Unauthorized)
+    - Duplicate username check on registration (409 Conflict)
+
+  ROUTE LAYER (app.py):
+    - request.get_json(silent=True) or {} — handles missing/invalid JSON body
+    - (body.get("field") or "").strip() — handles missing fields gracefully
+    - api_response() translates internal errors to HTTP JSON responses
+
+  NO TRY/EXCEPT in managers:
+    - File I/O errors will propagate as unhandled exceptions
+    - Flask's debug mode will show the traceback
+    - This is a deliberate simplicity choice for a development-only app
+
+8.2 FRONTEND ERROR HANDLING
+------------------------------
+
+  API CLIENT (api.js):
+    - fetch() wrapped in try/catch
+    - If response not OK (!res.ok): throws error string from server
+    - If network failure: throws "Network error. Please check your connection."
+    - If thrown value is string: re-throws as-is
+    - All callers use try/catch with toast() for error display
+
+  AUTH PAGES (auth.js):
+    - Client-side validation before API call (empty fields, min lengths)
+    - Server errors displayed in #error-box alert
+    - Special handling: "user_not_found" error auto-redirects to register
+    - Button disabled during request (prevents double-submit)
+
+  DASHBOARD (app.js):
+    - All async handlers wrapped in try/catch
+    - Errors shown via toast("message", "error")
+    - handleToggleTask: on error, calls loadCards() to re-sync with server
+    - confirm() dialogs for destructive actions (delete card, delete all)
+
+  COMFORT ZONE (controller):
+    - Video errors shown via toast
+    - Invalid settings (< 1) caught before Pomodoro.start()
+    - Pomodoro.start() returns false for invalid params
+
+  NOTES EDITOR:
+    - Save validation: title required
+    - Save change detection: skip if nothing changed
+    - _isSaving guard prevents double-save
+    - Delete uses confirm() dialog
+    - Search fallback: if API fails, filters locally from cached _notes
+    - Status messages auto-clear after 4s (errors persist)
+
+8.3 EDGE CASES COVERED
+-------------------------
+
+  - Empty/whitespace-only inputs: trimmed and validated
+  - Page reload during Pomodoro: timer recovers from localStorage timestamp
+  - Page reload during video: URL and position recovered
+  - Page reload during inline edit: editing state recovered from localStorage
+  - Page reload with unsaved task draft: draft recovered per-card
+  - Browser tab backgrounded: Pomodoro uses timestamp math, not counter
+  - Timer expires while page closed: detected on recovery, triggers end event
+  - YouTube API already loaded: detected, not loaded twice
+  - YouTube player destroyed: try/catch around all YT.Player calls
+  - Video play() promise rejection: caught silently (.catch(() => {}))
+  - localStorage full: set() wrapped in try/catch, fails silently
+  - Corrupted localStorage JSON: get() returns fallback value
+
+
+================================================================================
+  9. COMPONENT INTERACTION
+================================================================================
+
+9.1 DEPENDENCY MAP
+--------------------
+
+  Backend:
+    app.py depends on -> CardManager, NoteManager, UserManager, AuthService, JsonStorage
+    AuthService depends on -> UserManager
+    UserManager depends on -> JsonStorage, helpers, validators
+    CardManager depends on -> JsonStorage, helpers, validators
+    NoteManager depends on -> JsonStorage, helpers, validators
+    helpers depends on -> datetime (stdlib)
+    validators depends on -> nothing (pure functions)
+    JsonStorage depends on -> json, os, threading (stdlib)
+
+  Frontend (script load order matters):
+    theme.js -> standalone
+    state.js -> standalone (creates global State)
+    api.js -> standalone (creates global API)
+    auth.js -> depends on State, API
+    app.js -> depends on State, API, bootstrap (Toast)
+    pomodoro.js -> standalone (creates global Pomodoro, uses localStorage directly)
+    video_player.js -> standalone (creates global VideoPlayer, uses localStorage directly)
+    notes_editor.js -> depends on API (creates global NotesEditor)
+    comfort_zone_controller.js -> depends on State, Pomodoro, VideoPlayer, NotesEditor, bootstrap (Modal, Toast)
+
+9.2 COMMUNICATION PATTERNS
+-----------------------------
+
+  Backend modules: Direct method calls
+    Route -> Manager -> Storage (synchronous call chain)
+    Manager -> Validator (synchronous call, check result)
+    Manager -> Helper (pure function call)
+
+  Frontend modules: Three patterns
+
+  1. DIRECT CALLS (imperative)
+     Controller calls Pomodoro.start(), VideoPlayer.play(), NotesEditor.init()
+
+  2. CUSTOM EVENTS (decoupled, pub/sub)
+     Pomodoro emits "pomodoro:tick", "pomodoro:sessionEnd", etc.
+     VideoPlayer emits "video:stateChange", "video:error"
+     Controller listens via document.addEventListener()
+     PURPOSE: Pomodoro and VideoPlayer have ZERO knowledge of each other
+     or the controller. They are fully decoupled.
+
+  3. SHARED GLOBAL STATE (localStorage)
+     State module provides typed getters/setters
+     Multiple pages can read session data
+     Timer and video state persists across page navigations
+
+9.3 COUPLING ANALYSIS
+-----------------------
+
+  LOOSE COUPLING:
+    - Pomodoro <-> VideoPlayer: No direct references. Controller mediates.
+    - NotesEditor: Self-contained, reusable in two page contexts
+    - Validators: Pure functions, no dependencies
+    - Helpers: Pure functions, no side effects
+
+  TIGHT COUPLING:
+    - All managers tightly coupled to JsonStorage (constructor injection)
+    - AuthService tightly coupled to UserManager (facade pattern)
+    - app.py tightly coupled to all managers (direct instantiation)
+    - Frontend modules coupled to global names (State, API, Pomodoro, etc.)
+      This is mitigated by deterministic script load order
+
+  ABSTRACTION PATTERNS:
+    - JsonStorage abstracts file I/O behind read()/write() interface
+    - AuthService abstracts authentication behind login()/register()
+    - make_response() standardizes all internal result formats
+    - api_response() standardizes all HTTP response formats
+    - State module abstracts localStorage behind typed methods
+    - API module abstracts fetch() behind named methods
+
+
+================================================================================
+  10. CRITICAL DESIGN DECISIONS
+================================================================================
+
+  DECISION 1: JSON Files Instead of Database
+    WHY: Zero setup, no database server needed, human-readable data
+    TRADE-OFF: Not scalable, not suitable for concurrent multi-process access,
+    entire file rewritten on every mutation
+    MITIGATION: Threading lock prevents corruption within single process
+
+  DECISION 2: No Server-Side Sessions
+    WHY: Simplicity. User identity stored in localStorage, sent with each request.
+    TRADE-OFF: Any client can impersonate any user by setting user_id in localStorage.
+    Not secure for production. Acceptable for a personal productivity tool.
+
+  DECISION 3: Timestamp-Based Timer (Not Counter-Based)
+    WHY: setInterval is unreliable (browser throttles background tabs).
+    Recording startedAt + initialTime and computing remaining on each tick
+    ensures accuracy regardless of interval drift or tab suspension.
+    TRADE-OFF: Slightly more complex state management.
+
+  DECISION 4: CustomEvent Communication Between Modules
+    WHY: Decouples Pomodoro from VideoPlayer and UI. Either module can be
+    replaced or removed without affecting the other. Controller is the
+    single integration point.
+    TRADE-OFF: Harder to trace execution flow (event-driven vs direct calls).
+
+  DECISION 5: Title-Based Note Identity
+    WHY: Creates a natural "fork" behavior. Changing a note's title creates a new
+    note, preserving the original. Same title = update in place.
+    TRADE-OFF: Can lead to unexpected note duplication if user doesn't understand
+    the behavior. Mitigated by status messages ("Note created." vs "Note updated.")
+
+  DECISION 6: Task Indexing Instead of Task IDs
+    WHY: Tasks are always accessed within their parent card. Array index is the
+    simplest addressing scheme. No need for global task ID generation.
+    TRADE-OFF: Deletion shifts indices. Client must re-render from server response.
+
+  DECISION 7: Full Data Rewrite on Every Mutation
+    WHY: JsonStorage.write() overwrites the entire file. Simpler than
+    incremental updates to a JSON file.
+    TRADE-OFF: Performance degrades with large datasets. Acceptable for
+    personal use (hundreds of cards, not millions).
+
+  DECISION 8: No Frontend Framework
+    WHY: Vanilla JS keeps the project dependency-free, no build step needed.
+    TRADE-OFF: Manual DOM manipulation, no virtual DOM diffing, full re-renders.
+    Mitigated by event delegation and in-memory cache.
+
+  DECISION 9: Static Backdrop on Pomodoro Popups
+    WHY: Forces user to make an explicit choice (continue, break, finish).
+    Prevents accidentally dismissing the popup and losing context.
+
+  DECISION 10: Video Auto-Play/Pause Tied to Timer Mode
+    WHY: Core UX of "Comfort Zone" — video plays during work, pauses during
+    breaks. Creates a focused study environment.
+    Fullscreen is exited before popups to ensure visibility.
+
+
+================================================================================
+  11. END-TO-END SCENARIO WALKTHROUGHS
+================================================================================
+
+11.1 SCENARIO: USER REGISTERS, CREATES CARD, ADDS TASK, COMPLETES IT
+-----------------------------------------------------------------------
+
+  1. User navigates to http://localhost:5000/
+     -> Flask serves login.html
+     -> auth.js checks State.getSession() -> null -> stays on login
+
+  2. User clicks "Create one" link
+     -> Browser navigates to /register
+     -> Flask serves register.html
+
+  3. User fills "alice" / "pass123", clicks "Create Account"
+     -> auth.js: preventDefault, validate (alice >= 3 chars, pass123 >= 4 chars)
+     -> API.register("alice", "pass123")
+     -> fetch POST /api/register, body: {"username": "alice", "password": "pass123"}
+
+  4. Server: api_register()
+     -> auth_service.register("alice", "pass123")
+     -> user_manager.register("alice", "pass123")
+     -> validate_login_fields: ok
+     -> validate_username: ok (length 5)
+     -> validate_password: ok (length 7)
+     -> Lock acquired
+     -> Read users.json
+     -> find_user_by_username: null (no duplicate)
+     -> data["last_user_id"] = 4
+     -> new_user = {id:4, username:"alice", password: scrypt_hash, cards:[]}
+     -> Append to data["users"]
+     -> Write users.json
+     -> Return {success:true, data:{user_id:4, username:"alice"}}
+
+  5. Response: 201 {user_id: 4, username: "alice"}
+     -> auth.js: State.saveSession("alice", 4)
+     -> localStorage: taskapp_session = {"username":"alice","user_id":4}
+     -> Redirect to /dashboard
+
+  6. Dashboard loads
+     -> app.js: State.getSession() -> {username:"alice", user_id:4}
+     -> init(): set name, avatar, restore UI state, loadCards()
+     -> API.getCards(4) -> GET /api/cards?user_id=4
+     -> Server: card_manager.get_cards(4) -> find user -> return user["cards"] = []
+     -> cards = [], renderCards() -> empty state: "No cards yet"
+
+  7. User types "Study Plan" in new card input, clicks "+ Add Card"
+     -> handleAddCard(): title = "Study Plan"
+     -> API.createCard(4, "Study Plan")
+     -> Server: card_manager.create_card(4, "Study Plan")
+       -> Validate user_id and title
+       -> Lock, read, find user
+       -> new_card = {id:1, title:"Study Plan", created_at:..., tasks:[]}
+       -> Append to user["cards"], write
+     -> Response: 201 {card: {id:1, title:"Study Plan", ...}}
+     -> cards.push(data.card), clear input, renderCards()
+     -> Card appears in grid
+
+  8. User types "Read chapter 3" in card's add-task input, presses Enter
+     -> handleAddTask(1): text = "Read chapter 3"
+     -> API.addTask(4, 1, "Read chapter 3")
+     -> Server: card_manager.add_task(4, 1, "Read chapter 3")
+       -> Validate, lock, read, find user, find card
+       -> new_task = {text: "Read chapter 3", completed: false}
+       -> Append to card["tasks"], write
+     -> Response: 201 {card: {id:1, tasks:[{text:"Read chapter 3", completed:false}]}}
+     -> updateLocalCard(1, data.card), clearDraft(1), renderCards()
+
+  9. User clicks the checkbox next to "Read chapter 3"
+     -> change event: handleToggleTask(1, 0, true)
+     -> API.updateTask(4, 1, 0, {completed: true})
+     -> Server: card_manager.update_task(4, 1, 0, {completed: true})
+       -> Validate, lock, read, find user, find card
+       -> Check index bounds (0 < 1 = ok)
+       -> task["completed"] = True, write
+     -> Response: {card: {tasks:[{text:"Read chapter 3", completed:true}]}}
+     -> updateLocalCard, renderCards()
+     -> Task shows strikethrough, checkbox checked
+     -> Stats update: Done = 1
+
+11.2 SCENARIO: POMODORO SESSION WITH VIDEO (WORK -> BREAK -> WORK)
+--------------------------------------------------------------------
+
+  1. User navigates to /comfort-zone
+     -> comfort_zone_controller.js: session guard passes
+     -> init(): VideoPlayer.init(), NotesEditor.init(), recoverState()
+     -> No saved timer/video state -> idle mode
+
+  2. User pastes YouTube URL, clicks "Load"
+     -> handleLoadVideo(): url = "https://youtube.com/watch?v=abc12345678"
+     -> VideoPlayer.loadVideo(url)
+       -> extractYouTubeId() returns "abc12345678"
+       -> destroyPlayer(), clear wrapper
+       -> Create div#cz-yt-player
+       -> setState({videoUrl, currentTime:0, isPlaying:false})
+       -> loadYouTubeAPI() -> injects <script> tag
+       -> On API ready: creates YT.Player with onReady/onStateChange callbacks
+       -> onYTReady: _ytReady = true, emit stateChange
+
+  3. User sets Work=25, Break=5, Sessions=2, clicks "Start"
+     -> handleStart(): work=25, brk=5, sess=2
+     -> Pomodoro.start(25, 5, 2)
+       -> workSec = 1500
+       -> _state = {currentSession:1, totalSessions:2, mode:"work",
+                    remainingTime:1500, initialTime:1500, isRunning:true,
+                    startedAt: Date.now(), workDuration:25, breakDuration:5}
+       -> Save to localStorage, start interval (250ms)
+       -> Emit "pomodoro:tick"
+     -> updateControlButtons("running"), lockSettings(true)
+     -> toast("Pomodoro started!")
+
+  4. Every 250ms: tick()
+     -> Calculate remaining from timestamp
+     -> setState, emit "pomodoro:tick"
+     -> Controller onTick: updateTimerDisplay(), updateRing()
+     -> Ring smoothly depletes, timer counts down
+
+  5. After 25 minutes: remaining reaches 0
+     -> handleTimerEnd(): mode == "work"
+       -> Set isRunning=false, emit "pomodoro:sessionEnd"
+     -> Controller onSessionEnd():
+       -> Exit fullscreen, VideoPlayer.pause()
+       -> isLastSession = (1 >= 2) = false
+       -> Show popup: "Session 1 completed!"
+         Buttons: "Continue" and "Take Break"
+
+  6. User clicks "Take Break"
+     -> hidePopup(), Pomodoro.startBreak()
+       -> breakSec = 300 (5 min)
+       -> setState mode="break", start timer
+       -> Emit "pomodoro:modeSwitch"
+     -> Controller onModeSwitch(): mode == "break"
+       -> toast "Break time!", VideoPlayer.pause()
+
+  7. After 5 minutes: break timer reaches 0
+     -> handleTimerEnd(): mode == "break"
+       -> Emit "pomodoro:breakEnd"
+     -> Controller onBreakEnd():
+       -> Exit fullscreen, VideoPlayer.pause()
+       -> Show popup: "Break is over!"
+         Buttons: "Start Work Session" and "Take Another Break"
+
+  8. User clicks "Start Work Session"
+     -> hidePopup(), Pomodoro.nextSession()
+       -> next = 2, not > totalSessions(2)
+       -> setState: currentSession=2, mode="work", new timer
+       -> Emit "pomodoro:modeSwitch"
+     -> VideoPlayer.play() -> ytPlayer.playVideo()
+     -> Controller onModeSwitch(): mode == "work"
+       -> toast "Focus!", VideoPlayer.play()
+
+  9. After 25 more minutes: session 2 ends
+     -> onSessionEnd(): isLastSession = (2 >= 2) = true
+     -> Show popup: "That was your last session. Great work!"
+       Button: "Finish"
+
+  10. User clicks "Finish"
+      -> hidePopup(), handleReset()
+      -> Pomodoro.reset(), VideoPlayer.pause()
+      -> updateControlButtons("idle"), lockSettings(false)
+
+11.3 SCENARIO: NOTE CREATION WITH TITLE-BASED IDENTITY
+---------------------------------------------------------
+
+  1. User is on /notes page
+     -> Inline script: session guard, set username
+     -> NotesEditor.init("#notes-full-container", userId, {compact: false})
+     -> render(false): full-size editor HTML injected
+     -> bindEvents(), refresh()
+     -> API.getNotes(userId) -> returns existing notes
+     -> renderList() shows notes in sidebar
+
+  2. User types "Physics Ch.5" in title, writes body, clicks "Save Note"
+     -> handleSave():
+       -> _currentNoteId = null (new note)
+       -> title = "Physics Ch.5", body = "<p>Force = mass * acceleration</p>"
+       -> Validation: title not empty -> ok
+       -> No _currentNoteId -> CREATE path
+       -> API.createNote(userId, "Physics Ch.5", body)
+       -> Server: note_manager.create_note()
+         -> Validate, generate UUID4
+         -> Create note dict, append, write
+       -> Response: {note: {id: "abc-def-...", title: "Physics Ch.5", ...}}
+       -> _currentNoteId = "abc-def-..."
+       -> _originalTitle = "Physics Ch.5"
+       -> Status: "Note created."
+       -> refresh() reloads list
+
+  3. User modifies body (adds more text), clicks "Save Note"
+     -> handleSave():
+       -> _currentNoteId = "abc-def-..."
+       -> title = "Physics Ch.5" (unchanged from _originalTitle)
+       -> body has changed
+       -> SAME title, existing note -> UPDATE path
+       -> API.updateNote("abc-def-...", userId, "Physics Ch.5", newBody)
+       -> Server: note_manager.update_note()
+         -> Find note, verify ownership
+         -> Update body and updated_at
+       -> Status: "Note updated."
+
+  4. User changes title to "Physics Ch.5 (revised)", clicks "Save Note"
+     -> handleSave():
+       -> _currentNoteId = "abc-def-..."
+       -> title = "Physics Ch.5 (revised)" (DIFFERENT from _originalTitle)
+       -> Title changed -> CREATE path (even though _currentNoteId exists)
+       -> API.createNote(userId, "Physics Ch.5 (revised)", body)
+       -> NEW note created with new UUID
+       -> Original "Physics Ch.5" note still exists in database
+       -> _currentNoteId updated to new UUID
+       -> Status: "Note created."
+       -> Both notes visible in sidebar list
+
+
+================================================================================
+  APPENDIX: COMPLETE API ENDPOINT REFERENCE
+================================================================================
+
+  Method   Path                           Handler           Purpose
+  ------   ----                           -------           -------
+  GET      /                              login_page        Serve login HTML
+  GET      /register                      register_page     Serve register HTML
+  GET      /dashboard                     dashboard_page    Serve dashboard HTML
+  GET      /comfort-zone                  comfort_zone_page Serve comfort zone HTML
+  GET      /notes                         notes_page        Serve notes HTML
+
+  POST     /api/login                     api_login         Authenticate user
+  POST     /api/register                  api_register      Register new user
+
+  GET      /api/cards?user_id=X           get_cards         List user's cards
+  POST     /api/cards                     create_card       Create card
+  PUT      /api/cards/<id>                update_card       Update card title
+  DELETE   /api/cards/<id>                delete_card       Delete card
+  POST     /api/cards/bulk-delete         bulk_delete_cards Delete all cards
+
+  POST     /api/cards/<id>/tasks          add_task          Add task to card
+  PUT      /api/cards/<id>/tasks/<idx>    update_task       Update task
+  DELETE   /api/cards/<id>/tasks/<idx>    delete_task       Delete task
+  POST     /api/cards/<id>/tasks/bulk     bulk_task_action  Bulk task operation
+
+  GET      /api/notes?user_id=X           get_notes         List user's notes
+  POST     /api/notes                     create_note       Create note
+  PUT      /api/notes/<id>                update_note       Update note
+  DELETE   /api/notes/<id>                delete_note       Delete note
+  GET      /api/notes/search?user_id&q    search_notes      Search notes by title
+
+
+================================================================================
+  APPENDIX: localStorage KEY REFERENCE
+================================================================================
+
+  Key                  Module          Content
+  ---                  ------          -------
+  theme                theme.js        "light" | "dark"
+  taskapp_session      state.js        {username, user_id}
+  taskapp_filter       state.js        "all"|"completed"|"pending"
+  taskapp_sort         state.js        "newest"|"oldest"|"title"
+  taskapp_search       state.js        search query string
+  taskapp_drafts       state.js        {[card_id]: "draft text"}
+  taskapp_new_card     state.js        new card title draft
+  taskapp_editing      state.js        {card_id, task_index, tempText, type}
+  cz_timer             pomodoro.js     full timer state object
+  cz_video             video_player.js {videoUrl, currentTime, isPlaying}
+
+
+================================================================================
+  END OF DOCUMENTATION (Part 5 of 5)
+
+  Full documentation set:
+    Part 1: Project Overview, Architecture, Technology Stack, File Structure
+    Part 2: Execution Flow and Backend Functions Deep Dive
+    Part 3: Frontend Foundation Modules and Dashboard Controller
+    Part 4: Pomodoro, Video Player, Notes Editor, Comfort Zone Controller
+    Part 5: Data Management, Error Handling, Design Decisions, Walkthroughs
+================================================================================

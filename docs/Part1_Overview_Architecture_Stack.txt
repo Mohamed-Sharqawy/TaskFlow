@@ -1,0 +1,322 @@
+================================================================================
+  COMFORT ZONE (TaskFlow) — TECHNICAL DEEP-DIVE DOCUMENTATION
+  Part 1 of 5: Project Overview, Architecture, Technology Stack, File Structure
+================================================================================
+
+Generated: 2026-04-28
+Scope: Complete system-level technical reference
+
+
+================================================================================
+  1. PROJECT OVERVIEW
+================================================================================
+
+1.1 FUNCTIONAL PURPOSE
+----------------------
+  Comfort Zone (branded "TaskFlow") is a full-stack productivity application
+  that combines three core capabilities:
+
+    a) Card-Based Task Management (Dashboard)
+       - Users create "cards" (similar to Google Keep cards)
+       - Each card contains a title and a list of tasks
+       - Tasks can be created, edited, toggled (complete/incomplete), deleted
+       - Bulk operations: mark all done, clear completed, delete all cards
+       - Search, filter (all / has completed / has pending), sort (newest /
+         oldest / title A-Z)
+
+    b) Pomodoro Timer with Video Player (Comfort Zone)
+       - Configurable Pomodoro timer (work duration, break duration, sessions)
+       - SVG progress ring visualization
+       - Video player supporting both HTML5 <video> and YouTube IFrame API
+       - Video auto-plays during work sessions, auto-pauses during breaks
+       - Popup system for session transitions (continue / take break)
+
+    c) Notes Management (Notes)
+       - Rich-text editor using contentEditable and document.execCommand
+       - Title-based identity logic: same title = update, new title = create
+       - Server-side search by title substring
+       - Full-page mode (Notes page) and compact mode (Comfort Zone sidebar)
+
+1.2 CORE PROBLEM IT SOLVES
+---------------------------
+  Combines task tracking, focused study sessions (Pomodoro technique with
+  synchronized video playback), and note-taking into a single integrated
+  platform. State persists across page reloads via localStorage (frontend)
+  and JSON files (backend).
+
+1.3 APPLICATION TYPE
+---------------------
+  - Server-rendered multi-page web application
+  - Python Flask backend serving HTML templates
+  - RESTful JSON API for all data operations
+  - Vanilla JavaScript frontend (no frameworks like React/Vue)
+  - Bootstrap 5.3.3 for UI components and layout
+  - JSON file-based persistence (no database)
+
+
+================================================================================
+  2. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+2.1 ARCHITECTURE PATTERN
+--------------------------
+  The project follows a LAYERED MODULAR architecture:
+
+    Layer 1: ROUTES (app.py)
+      - Thin route layer
+      - Receives HTTP requests, extracts parameters
+      - Delegates to manager/service classes
+      - Converts internal result dicts to Flask JSON responses
+
+    Layer 2: SERVICES (services/)
+      - AuthService: Facade over UserManager for login/register
+      - JsonStorage: Centralized JSON file I/O with thread-safe locking
+
+    Layer 3: MODELS / MANAGERS (models/)
+      - UserManager: User registration, authentication, lookup
+      - CardManager: Card and Task CRUD operations
+      - NoteManager: Note CRUD and search operations
+
+    Layer 4: UTILITIES (utils/)
+      - helpers.py: Pure functions for lookups, ID generation, timestamps
+      - validators.py: Input validation returning standardized result dicts
+
+  On the frontend, the architecture is MODULE-BASED:
+
+    Foundation Layer: theme.js, state.js, api.js
+      - Loaded on every page
+      - Provide theme toggling, localStorage management, API client
+
+    Page Controllers:
+      - auth.js: Login and Register page logic
+      - app.js: Dashboard controller (card/task rendering, CRUD, inline editing)
+      - comfort_zone_controller.js: Orchestrates Pomodoro + Video + Notes
+
+    Feature Modules:
+      - pomodoro.js: Timer engine (pure logic, emits CustomEvents)
+      - video_player.js: HTML5 + YouTube player wrapper
+      - notes_editor.js: Self-contained notes editor (reusable in two contexts)
+
+2.2 COMPONENT INTERACTION DIAGRAM
+-----------------------------------
+
+  [Browser] --HTTP--> [Flask app.py]
+                          |
+           +--------------+--------------+
+           |              |              |
+      [AuthService]  [CardManager]  [NoteManager]
+           |              |              |
+      [UserManager]       |              |
+           |              |              |
+           +--------------+--------------+
+                          |
+                     [JsonStorage]
+                          |
+                  [users.json / notes.json]
+
+  Frontend Module Communication:
+
+  [theme.js]  -- standalone, runs on DOMContentLoaded
+  [state.js]  -- IIFE module, exposes global State object
+  [api.js]    -- IIFE module, exposes global API object
+
+  Dashboard:
+    [auth.js or app.js] --> uses State + API
+
+  Comfort Zone:
+    [comfort_zone_controller.js]
+        |-- calls --> Pomodoro.start/pause/resume/reset
+        |-- calls --> VideoPlayer.init/loadVideo/play/pause
+        |-- calls --> NotesEditor.init
+        |-- listens --> document CustomEvents from Pomodoro + VideoPlayer
+
+  Notes Page:
+    [Inline <script>] --> NotesEditor.init("#notes-full-container")
+
+2.3 DATA FLOW
+--------------
+  Request Flow:
+    1. User action in browser (click, form submit)
+    2. JavaScript handler calls API.methodName()
+    3. fetch() sends JSON request to Flask endpoint
+    4. app.py route extracts parameters from request body/query
+    5. Route calls manager method (e.g., card_manager.create_card())
+    6. Manager validates input via validators.py
+    7. Manager acquires thread lock via storage.lock
+    8. Manager reads JSON file via storage.read()
+    9. Manager modifies in-memory data structure
+   10. Manager writes back via storage.write()
+   11. Manager returns standardized result dict
+   12. Route converts to Flask JSON response via api_response()
+   13. JavaScript receives JSON, updates local state, re-renders UI
+
+  State Persistence Flow:
+    - Backend data: JSON files (users.json, notes.json)
+    - Frontend UI state: localStorage (session, filters, drafts, timer, video)
+    - On page load: JS modules read localStorage to restore UI state
+    - On user action: JS saves state to localStorage immediately
+
+
+================================================================================
+  3. TECHNOLOGY STACK
+================================================================================
+
+3.1 BACKEND
+
+  Name            : Python 3.x
+  Purpose         : Server-side runtime
+  Usage           : All backend code is Python
+
+  Name            : Flask
+  Purpose         : Web framework for routing and template rendering
+  Why chosen      : Lightweight, minimal boilerplate, perfect for small apps
+  Usage           : app.py creates Flask instance, defines routes, serves templates
+
+  Name            : Werkzeug (werkzeug.security)
+  Purpose         : Password hashing (scrypt algorithm)
+  Why chosen      : Ships with Flask, provides secure password hashing out of box
+  Usage           : user_manager.py uses generate_password_hash() for registration
+                    and check_password_hash() for login verification
+
+  Name            : JSON (stdlib)
+  Purpose         : Data serialization/deserialization
+  Why chosen      : No external database needed; simple file-based persistence
+  Usage           : json_storage.py reads/writes .json files
+
+  Name            : threading (stdlib)
+  Purpose         : Thread-safe file access
+  Why chosen      : Flask development server can handle concurrent requests
+  Usage           : JsonStorage uses threading.Lock() to guard read/write operations
+
+  Name            : uuid (stdlib)
+  Purpose         : Generate unique note IDs
+  Why chosen      : Globally unique, no auto-increment counter needed for notes
+  Usage           : note_manager.py generates UUID4 strings for each new note
+
+3.2 FRONTEND
+
+  Name            : Bootstrap 5.3.3
+  Purpose         : UI component framework (cards, modals, toasts, grid, forms)
+  Why chosen      : Rapid UI development, responsive grid, built-in components
+  Usage           : CDN-loaded in all HTML templates; navbar, cards, modals, toasts
+                    bootstrap.Modal and bootstrap.Toast instantiated in JS
+
+  Name            : Vanilla JavaScript (ES6+)
+  Purpose         : All frontend logic
+  Why chosen      : No build step needed, direct browser execution, small project
+  Usage           : 9 JS files using IIFE modules, async/await, CustomEvent API
+
+  Name            : YouTube IFrame Player API
+  Purpose         : Embed and control YouTube videos programmatically
+  Why chosen      : Official API for YouTube playback control
+  Usage           : video_player.js dynamically loads the API script, creates
+                    YT.Player instances, handles state change events
+
+  Name            : localStorage (Web API)
+  Purpose         : Client-side state persistence across page reloads
+  Why chosen      : No server-side session management needed for UI state
+  Usage           : state.js manages session, filters, drafts, editing state;
+                    pomodoro.js persists timer state; video_player.js persists
+                    video URL and playback position
+
+  Name            : document.execCommand (Web API)
+  Purpose         : Rich-text formatting in contentEditable div
+  Why chosen      : Simple, no third-party editor library needed
+  Usage           : notes_editor.js toolbar buttons trigger bold, italic,
+                    insertUnorderedList, fontSize commands
+
+3.3 CSS
+
+  Name            : style.css
+  Purpose         : Global styles, dark/light mode, task checkbox, search highlight
+  Usage           : Loaded on every page
+
+  Name            : comfort_zone.css
+  Purpose         : SVG timer ring, video wrapper, notes editor styling
+  Usage           : Loaded on comfort_zone.html and indirectly affects notes
+
+  Name            : notes.css
+  Purpose         : Full-page notes layout overrides (larger editor/list heights)
+  Usage           : Loaded only on notes.html
+
+
+================================================================================
+  4. FILE AND FOLDER STRUCTURE BREAKDOWN
+================================================================================
+
+4.1 ROOT DIRECTORY
+
+  app.py                    Entry point. Flask app configuration, all route
+                            definitions, service/manager instantiation.
+
+  data/                     Persistent storage directory
+    users.json              User accounts, cards, and tasks
+    notes.json              Notes with rich-text HTML bodies
+
+  models/                   Business logic layer (manager classes)
+    __init__.py             Package marker
+    card_manager.py         CardManager class: card + task CRUD
+    note_manager.py         NoteManager class: note CRUD + search
+    user_manager.py         UserManager class: register + login + lookup
+
+  services/                 Service layer (infrastructure)
+    __init__.py             Package marker
+    auth_service.py         AuthService class: thin facade over UserManager
+    json_storage.py         JsonStorage class: thread-safe JSON file I/O
+
+  utils/                    Shared utility layer
+    __init__.py             Package marker
+    helpers.py              Pure functions: find_user_by_id, find_user_by_username,
+                            find_card, next_card_id, utc_timestamp, make_response
+    validators.py           Input validators: validate_user_id, validate_username,
+                            validate_password, validate_login_fields,
+                            validate_card_title, validate_task_text,
+                            validate_note_title, validate_bulk_action
+
+  templates/                Jinja2 HTML templates served by Flask
+    login.html              Login page (default entry point at "/")
+    register.html           Registration page at "/register"
+    dashboard.html          Card-based task dashboard at "/dashboard"
+    comfort_zone.html       Pomodoro + Video + Notes at "/comfort-zone"
+    notes.html              Full-page notes editor at "/notes"
+
+  static/                   Static assets served by Flask
+    css/
+      style.css             Global styles, dark mode, task checkbox
+      comfort_zone.css      Timer ring, video wrapper, notes editor
+      notes.css             Full-page notes layout overrides
+    js/
+      theme.js              Dark/light mode toggle (runs on all pages)
+      state.js              localStorage wrapper (State module)
+      api.js                fetch() wrapper (API module)
+      auth.js               Login + Register form handlers
+      app.js                Dashboard controller
+      pomodoro.js            Pomodoro timer engine (Pomodoro module)
+      video_player.js       Video player wrapper (VideoPlayer module)
+      notes_editor.js       Notes editor (NotesEditor module)
+      comfort_zone_controller.js  Orchestration for Comfort Zone page
+    avatars/                Directory for user avatar assets (currently empty)
+
+4.2 WHY THIS STRUCTURE
+
+  The structure follows SEPARATION OF CONCERNS:
+
+  - Routes (app.py) are kept thin; no business logic in route handlers
+  - Business logic lives in models/ (managers handle validation + data ops)
+  - Infrastructure lives in services/ (storage I/O, auth facade)
+  - Shared utilities in utils/ prevent code duplication
+  - Frontend modules are single-responsibility IIFE modules
+  - CSS is split by page/feature scope
+  - Templates map 1:1 to application pages
+
+  This separation allows:
+  - Changing storage from JSON to a database by swapping JsonStorage
+  - Adding new managers without touching routes
+  - Reusing NotesEditor in two different page contexts
+  - Testing validators and helpers independently
+
+
+================================================================================
+  END OF PART 1
+  Next: Part 2 — Execution Flow and Backend Functions Deep Dive
+================================================================================
